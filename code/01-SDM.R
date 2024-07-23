@@ -272,24 +272,24 @@ write.csv(bg.df, paste0(results.dir, "background_points.csv"))
 
 # -------------------------------------------------------------------------
 
-bg.df <- read.csv(paste0(results.dir, "background_points.csv")) %>%
+bg.df <- read.csv(paste0(results.dir, "background_points.csv")) |>
   dplyr::select(x, y)
 
 
 ggplot() +
   geom_sf(data = sdm_train_mask.sf) +
-  geom_sf(data = bg.df %>% st_as_sf(coords = c(1, 2), crs = 4326))
+  geom_sf(data = bg.df |> st_as_sf(coords = c(1, 2), crs = 4326))
 
 spec_thinned.sf <- st_read(paste0(results.dir, "spec_obs_thinned.gpkg"))
 
-species <- spec_thinned.sf$species %>% unique()
+species <- spec_thinned.sf$species |> unique()
 
 
 # for(spec in species){
 trainSDM <- function(spec, input_obs) {
   browser()
   print(spec)
-  spec_dir <- paste0(results.dir, spec %>% str_replace(" ", "_"), "/")
+  spec_dir <- paste0(results.dir, spec |> str_replace(" ", "_"), "/")
 
   # See if model exists, if overwrite = F, then skip it
   sdm_fp <- paste0(spec_dir, "sdm_model.rds")
@@ -302,10 +302,10 @@ trainSDM <- function(spec, input_obs) {
     n_replicates <- 5
 
     predictor.stack <- rast(paste0(results.dir, "predictors.tif"))
-    names(predictor.stack) <- names(predictor.stack) %>% str_replace_all(" ", "_")
+    names(predictor.stack) <- names(predictor.stack) |> str_replace_all(" ", "_")
 
-    pos_pts.df <- input_obs %>%
-      filter(species == spec) %>%
+    pos_pts.df <- input_obs |>
+      filter(species == spec) |>
       st_coordinates()
     abs_pts.df <- bg.df
 
@@ -351,9 +351,9 @@ trainSDM <- function(spec, input_obs) {
 
     # Concat pres and absence
     pre.sf <- bind_rows(
-      pres_sp.df %>% data.frame() %>%
-        rename(x = X, y = Y) %>% mutate(Y = 1),
-      abs_sp.df %>% tibble() %>% mutate(Y = 0)
+      pres_sp.df |> data.frame() |>
+        rename(x = X, y = Y) |> mutate(Y = 1),
+      abs_sp.df |> tibble() |> mutate(Y = 0)
     )
 
     block_sp.sf <- st_as_sf(pre.sf, coords = c("x", "y"), crs = crs(predictor.stack))
@@ -362,14 +362,14 @@ trainSDM <- function(spec, input_obs) {
     # It's important that pre.sf and block_sp.sf are in same order
     sp_extract.df <-
       terra::extract(predictor.stack,
-        block_sp.sf %>% dplyr::select(-Y),
+        block_sp.sf |> dplyr::select(-Y),
         df = T, ID = F, xy = T
-      ) %>%
-      mutate(Y = pre.sf$Y) %>%
+      ) |>
+      mutate(Y = pre.sf$Y) |>
       # This removes like 3000 points, should investigate
       na.omit()
 
-    sp_extract.sf <- sp_extract.df %>%
+    sp_extract.sf <- sp_extract.df |>
       st_as_sf(coords = c("x", "y"), crs = st_crs(block_sp.sf))
 
 
@@ -381,8 +381,8 @@ trainSDM <- function(spec, input_obs) {
     scv1 <- cv_spatial(
       x = sp_extract.sf,
       column = "Y", # the response column (binary or multi-class)
-      r = predictor.stack[names(sp_extract.sf %>%
-        data.frame() %>%
+      r = predictor.stack[names(sp_extract.sf |>
+        data.frame() |>
         dplyr::select(-Y, -geometry))],
       k = n_replicates, # number of folds
       size = 52000, # size of the blocks in metres
@@ -401,8 +401,8 @@ trainSDM <- function(spec, input_obs) {
     # Create SWD object
     data <- prepareSWD(
       species = spec,
-      p = sp_extract.sf %>% filter(Y == 1) %>% st_coordinates(),
-      a = sp_extract.sf %>% filter(Y == 0) %>% st_coordinates(),
+      p = sp_extract.sf |> filter(Y == 1) |> st_coordinates(),
+      a = sp_extract.sf |> filter(Y == 0) |> st_coordinates(),
       env = predictor.stack,
       categorical = c(
         "NLCD_Land_Cover_Class",
