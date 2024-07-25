@@ -22,9 +22,9 @@ sdm_train_mask.sf <- terrestrial.sf
 
 # results.dir <- paste0("results/sdm/run-",
 #                       format(Sys.time(), "%Y-%m-%d"),
-#                       "_firstshot/")
+#                       "_newvars/")
 
-results.dir <- "results/sdm/run-2024-07-16_firstshot/"
+results.dir <- "results/sdm/run-2024-07-24_newvars/"
 
 dir.create(results.dir, recursive = TRUE)
 
@@ -54,7 +54,8 @@ predictor_names <- c(
   "vegetation",
   "nlcd_landcover", "nlcd_treecover",
   "wetland_fresh_distance", "greenspace10acre_distance", "natural-stream-dist",
-  "ces"
+  "nlcd_impervious", "CES_traffic", "CES_pollution"
+  # "ces"
   # "soils_suborder" # incomplete data
 )
 predictors.sr <-
@@ -221,9 +222,9 @@ write_sf(spec_thinned.sf, paste0(results.dir, "spec_obs_thinned.gpkg"))
 predictors.sr <- rast(paste0(results.dir, "predictors.tif"))
 spec_thinned.sf <- st_read(paste0(results.dir, "spec_obs_thinned.gpkg"))
 
-ggplot() +
-geom_sf(data = background_landmask.sf) +
-geom_sf(data = spec_cleaned.sf)
+# ggplot() +
+# geom_sf(data = background_landmask.sf) +
+# geom_sf(data = spec_cleaned.sf)
 
 
 # Simplify input polygons and add some buffer zone to it
@@ -287,7 +288,7 @@ species <- spec_thinned.sf$species |> unique()
 
 # for(spec in species){
 trainSDM <- function(spec, input_obs) {
-  browser()
+  # browser()
   print(spec)
   spec_dir <- paste0(results.dir, spec |> str_replace(" ", "_"), "/")
 
@@ -372,11 +373,12 @@ trainSDM <- function(spec, input_obs) {
     sp_extract.sf <- sp_extract.df |>
       st_as_sf(coords = c("x", "y"), crs = st_crs(block_sp.sf))
 
+    # browser()
 
-
-    cv_spatial_autocor(x = sp_extract.sf,
-                       column = "Y")
-    cv_block_size(x = sp_extract.sf, column = "Y")
+    # Check spatial autocorrelation to inform block size
+    # cv_spatial_autocor(x = sp_extract.sf,
+    #                    column = "Y")
+    # cv_block_size(x = sp_extract.sf, column = "Y")
 
     scv1 <- cv_spatial(
       x = sp_extract.sf,
