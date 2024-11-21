@@ -249,6 +249,7 @@ library(glue)
 library(tictoc)
 library(duckdbfs)
 library(dplyr)
+library(fasterize)
 
 tcon <- dbConnect(duckdb("data/greenspaces/temp.duckdb"))
 tcon |> dbExecute("install spatial; load spatial")
@@ -295,7 +296,7 @@ SELECT * EXCLUDE geom,
   ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true) AS geom3310,
   ST_TRANSFORM(ST_Centroid(grn.geom), 'EPSG:4326', 'EPSG:3310', always_xy := true) AS centroid_geom3310,
   ST_Centroid(grn.geom) AS centroid_geom,
-  ST_SIMPLIFY(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true), 5000) AS simple_geom3310
+  ST_SimplifyPreserveTopology(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true), 5000) AS simple_geom3310
 FROM ST_READ('data/predictor_prep/nlcd_greenspace_area.gpkg') AS grn
 JOIN baycounties
   ON ST_Intersects(grn.geom, ST_GeomFromText(baycounties.geom_wkt));
@@ -305,6 +306,7 @@ CREATE INDEX idx_grn_centroid_geom ON greenspace_geo USING RTREE (centroid_geom)
 CREATE INDEX idx_grn_simple_geom ON greenspace_geo USING RTREE (simple_geom3310);
 CREATE INDEX idx_grn_cent3310_geom ON greenspace_geo USING RTREE (centroid_geom3310);
 ")
+# ST_SimplifyPreserveTopology was crucial
 
 ## Test to see if I can reduce vertices with simplify
 # tcon |> dbGetQuery("
@@ -417,13 +419,22 @@ LIMIT 1")
 
 tcon |> dbGetQuery("
 SELECT COUNT(*) FROM greenspace_geo
-WHERE AREA_acres >= 130")
+WHERE AREA_acres >= 30")
 
-tcon |> dbGetQuery("
-SELECT ST_AsText(geom3310)
-FROM greenspace_geo
-WHERE AREA_acres >= 130
-LIMIT 1")
+# x <- tcon |>
+#   dbGetQuery("
+# SELECT ST_AsTEXT(simple_geom3310) AS geom_text
+# FROM greenspace_geo
+# WHERE AREA_acres >= 75;") |>
+#   tibble() |>
+#   st_as_sf(wkt = "geom_text")
+
+plot(x)
+View(x)
+
+tcon |>
+  tbl("greenspace_geo") |>
+  filter(AREA_acres >= 75)
 
 tcon |> tbl("greenspace_geo")
 
@@ -438,12 +449,7 @@ SELECT
     ST_AsText(template.centroid_geom) AS geom_wkt,
     MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
 FROM
-     -- template_grid_geo AS template
     template_grid_geo AS template, green
- -- JOIN green
- -- ON ST_Intersects(template.centroid_geom, green.buffer100km_geom)
-   -- WHERE ST_DWithin(template.centroid_geom3310, green.centroid_geom3310, 10000)
-  --  WHERE ST_Intersects(template.centroid_geom, green.buffer100km_geom)
 GROUP BY
     template.id, template.geom, template.centroid_geom;
 ")
@@ -458,7 +464,7 @@ SET preserve_insertion_order = true;
 SET threads TO 20;
 ")
 
-# 130
+# testing
 tic()
 tcon |> dbExecute(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "130", "130"))
 toc()
@@ -471,28 +477,98 @@ tcon |>
   arrange(distance_to_greenspace_meters)
 
 
+# 130
 tic()
 tcon |> dbExecute(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "130", "130"))
 toc()
-# 4.75 hrs
+# 790 seconds
 
 slope.sr <- rast("data/predictors/slope.tif")
 empty.sr <- rast(slope.sr[[1]])
 tcon |> dbListTables()
-y <- tcon |>
+sf_dist130 <- tcon |>
   tbl("grn_distance_grd_130") |>
   collect() |>
   st_as_sf(wkt = "geom_wkt")
 
-greenspace_dist130 <- y |> rasterize(empty.sr, field = "distance_to_greenspace_meters")
+greenspace_dist130 <- sf_dist130 |>
+  rasterize(empty.sr,
+    field = "distance_to_greenspace_meters",
+    fun = "min"
+  )
 plot(greenspace_dist130)
-greenspace_dist130 |> writeRaster("data/predictors/130acre_greenspace_distance.tif")
-# write raster
-plot(greenspace_dist130)
+greenspace_dist130 |> writeRaster("data/predictors/130acre_greenspace_distance.tif", overwrite = T)
 
 
+# 75
+tic()
+tcon |> dbExecute(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "75", "75"))
+toc()
+# 19 minutes
 
+greenspace_dist75 <- tcon |>
+  tbl("grn_distance_grd_75") |>
+  collect() |>
+  st_as_sf(wkt = "geom_wkt") |>
+  rasterize(empty.sr, field = "distance_to_greenspace_meters")
+plot(greenspace_dist75)
+greenspace_dist75 |> writeRaster("data/predictors/75acre_greenspace_distance.tif", overwrite = T)
 
+# 30
+tic()
+tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "30", "30")))
+toc()
+# 36 minutes
+
+sf_dist30 <- tcon |>
+  tbl("grn_distance_grd_30") |>
+  collect() |>
+  st_as_sf(wkt = "geom_wkt")
+
+greenspace_dist30 <- sf_dist30 |>
+  rasterize(empty.sr, field = "distance_to_greenspace_meters")
+plot(greenspace_dist30)
+greenspace_dist30 |> writeRaster("data/predictors/30acre_greenspace_distance.tif", overwrite = T)
+
+# 2
+tic()
+tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "2", "2")))
+toc()
+#  6.1 hours
+
+tcon |> dbGetQuery("
+WITH tab AS
+(SELECT g2.geom_wkt AS d2,
+       g130.geom_wkt AS d130
+FROM
+  grn_distance_grd_2 AS g2
+LEFT JOIN
+  grn_distance_grd_130 AS g130
+ON g130.template_id = g2.template_id)
+
+SELECT COUNT(*)
+FROM tab
+WHERE d2 != d130
+")
+tcon |> dbGetQuery("DESCRIBE grn_distance_grd_130")
+# Hmm the values are the same. What's going wrong.
+tcon |>
+  tbl("grn_distance_grd_130") |>
+  select(template_id, d130 = distance_to_greenspace_meters) |>
+  left_join(
+    tcon |> tbl("grn_distance_grd_30") |>
+      select(template_id, d30 = distance_to_greenspace_meters),
+    by = "template_id"
+  ) |>
+  filter(d30 != d130) |>
+  collect()
+
+identical(sf_dist30$distance_to_greenspace_meters, sf_dist130$distance_to_greenspace_meters)
+identical(greenspace_dist130, greenspace_dist30)
+x <- rast("data/predictors/130acre_greenspace_distance.tif")
+y <- rast("data/predictors/30acre_greenspace_distance.tif")
+hist(greenspace_dist130)
+identical(values(greenspace_dist75), values(greenspace_dist30))
 
 x <- tcon |>
   tbl("grn_distance_grd_130_test") |>
