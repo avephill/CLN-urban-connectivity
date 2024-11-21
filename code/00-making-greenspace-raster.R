@@ -238,6 +238,7 @@ gs_area.sf |> write_sf("data/predictor_prep/nlcd_greenspace_area.gpkg")
 #   geom_sf(aes(fill = NLCD.Land.Cover.Class))
 
 # Attempt with duckdb ---------------------------------------
+
 library(sf)
 library(tidyverse)
 library(terra)
@@ -258,40 +259,87 @@ tcon |> dbGetQuery("DESCRIBE greenspace_geo")
 tcon |> dbDisconnect(shutdown = T)
 
 ## Read data to duckdb  ---------------------------------------
-# This came from 00-data prep.R
-# cln_grn <- st_read("data/greenspaces/christine_greenspace.gpkg")
-# nlcd_grn <- st_read("data/predictor_prep/nlcd_greenspace_area.gpkg")
-# Okay this is done we can read it in
 
-# plot(cln_grn |> st_geometry())
+### Counties  ---------------------------------------
+# Need to add counties so I properly filter out greenspaces that I don't care about
 
-# tcon |> copy_to(nlcd_grn, name = "greenspace", overwrite = T)
+counties <- st_read("~/Data/Boundaries/Political/CA_Counties/CA_Counties_TIGER2016.shp") |>
+  rename_with(tolower) |>
+  filter(name %in% c("Solano", "Contra Costa", "Alameda", "Santa Clara", "San Mateo", "San Francisco", "Marin", "Sonoma", "Napa", "Santa Cruz")) |>
+  st_transform(4326) |>
+  select(name) |>
+  st_union(is_coverage = T) |>
+  st_buffer(.1) |>
+  st_simplify(dTolerance = 5000) |>
+  st_as_sf() |>
+  rename(geom = x) |>
+  mutate(geom_wkt = st_as_text(geom, EWKT = T))
 
+plot(counties)
+
+tcon |> copy_to(
+  counties,
+  name = "baycounties",
+  overwrite = T
+)
+
+tcon |> tbl("baycounties")
+
+### Greenspace  ---------------------------------------
 # Fix geometry and tables
 tcon |> dbExecute("
 CREATE OR REPLACE TABLE greenspace_geo
 AS
-SELECT * EXCLUDE geom, geom, ST_Centroid(geom) AS centroid_geom
-FROM ST_READ('data/predictor_prep/nlcd_greenspace_area.gpkg');
+SELECT * EXCLUDE geom,
+  grn.geom,
+  ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true) AS geom3310,
+  ST_TRANSFORM(ST_Centroid(grn.geom), 'EPSG:4326', 'EPSG:3310', always_xy := true) AS centroid_geom3310,
+  ST_Centroid(grn.geom) AS centroid_geom,
+  ST_SIMPLIFY(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true), 5000) AS simple_geom3310
+FROM ST_READ('data/predictor_prep/nlcd_greenspace_area.gpkg') AS grn
+JOIN baycounties
+  ON ST_Intersects(grn.geom, ST_GeomFromText(baycounties.geom_wkt));
 
 CREATE INDEX idx_grn_geom ON greenspace_geo USING RTREE (geom);
 CREATE INDEX idx_grn_centroid_geom ON greenspace_geo USING RTREE (centroid_geom);
+CREATE INDEX idx_grn_simple_geom ON greenspace_geo USING RTREE (simple_geom3310);
+CREATE INDEX idx_grn_cent3310_geom ON greenspace_geo USING RTREE (centroid_geom3310);
 ")
 
-# Add buffer column
-tcon |> dbExecute("
-    ALTER TABLE greenspace_geo
-    ADD COLUMN buffer100km2_geom GEOMETRY
-")
+## Test to see if I can reduce vertices with simplify
+# tcon |> dbGetQuery("
+# SELECT DISTINCT ST_NPoints(geom)
+# FROM greenspace_geo
+# ORDER BY ST_NPoints(geom) DESC
+# LIMIT 10
+# ")
 
-tcon |> dbExecute("
-    UPDATE greenspace_geo
-    SET buffer100km2_geom = ST_SIMPLIFY(ST_Buffer(geom, 1), .25)
-")
+# tcon |> dbGetQuery("
+# WITH green AS
+# (SELECT ST_SIMPLIFY(geom, .05) AS geom
+# FROM greenspace_geo)
 
-tcon |> dbExecute("
-    CREATE INDEX idx_grn_buffer1002_geom ON greenspace_geo USING RTREE (buffer100km2_geom);
-")
+# SELECT DISTINCT ST_NPoints(geom)
+# FROM green
+# ORDER BY ST_NPoints(geom) DESC
+# LIMIT 10")
+# Can reduce geom vertices significantly
+
+# # Add buffer column
+# tcon |> dbExecute("
+#     ALTER TABLE greenspace_geo
+#     ADD COLUMN buffer100km_geom GEOMETRY
+# ")
+
+# tcon |> dbExecute("
+#     UPDATE greenspace_geo
+#     SET buffer100km_geom = ST_SIMPLIFY(ST_Buffer(geom, 1), .1)
+# ")
+
+
+# tcon |> dbExecute("
+#     CREATE INDEX idx_grn_buffer100_geom ON greenspace_geo USING RTREE (buffer100km_geom);
+# ")
 
 # tcon |> dbExecute("DROP INDEX temp_db.idx_grn_buff_geom;")
 # tcon |> dbExecute("
@@ -317,12 +365,20 @@ cub_grid.sf |> write_sf("data/predictor_prep/template.gpkg")
 cub_grid.sf |> head(10)
 
 # Fix geometry and tables
+# always_xy := true is necessary in st_transform
+# see https://github.com/duckdb/duckdb_spatial/issues/211
 tcon |> dbExecute("
 CREATE OR REPLACE TABLE template_grid_geo
 AS
-SELECT row_number() OVER () AS id, geom, ST_Centroid(geom) AS centroid_geom
+SELECT row_number() OVER () AS id,
+  geom,
+  ST_TRANSFORM(geom, 'EPSG:4326', 'EPSG:3310', always_xy := true) AS geom3310,
+  ST_Centroid(geom) AS centroid_geom,
+  ST_TRANSFORM(ST_Centroid(geom), 'EPSG:4326', 'EPSG:3310', always_xy := true) AS centroid_geom3310
 FROM ST_Read('data/predictor_prep/template.gpkg');
 ")
+
+
 
 tcon |> dbExecute("
 CREATE INDEX idx_template_geom ON template_grid_geo USING RTREE (geom);
@@ -363,51 +419,34 @@ tcon |> dbGetQuery("
 SELECT COUNT(*) FROM greenspace_geo
 WHERE AREA_acres >= 130")
 
-# Re-run this, I didn't use buffer_geom
-# nn_query <- glue("
-# WITH green AS
-# (SELECT * FROM greenspace_geo
-# WHERE AREA_acres >= %s
-# LIMIT 10)
+tcon |> dbGetQuery("
+SELECT ST_AsText(geom3310)
+FROM greenspace_geo
+WHERE AREA_acres >= 130
+LIMIT 1")
 
-# SELECT
-#     template.id AS template_id,
-#     template.geom AS template_geom,
-#     -- ST_AsText(template.centroid_geom) AS geom_wkt,
-#     MIN(ST_Distance(template.centroid_geom, green.geom)) AS distance_to_greenspace
-# FROM
-#     template_grid_geo AS template, green
-#     -- WHERE ST_DWithin(template.centroid_geom, green.centroid_geom, .1)
-#     WHERE ST_Intersects(template.centroid_geom, green.buffer100km_geom)
-# GROUP BY
-#     template.id, template.geom, template.centroid_geom;
-# ")
+tcon |> tbl("greenspace_geo")
 
-# Expiremental
 nn_query <- glue("
 WITH green AS
 (SELECT * FROM greenspace_geo
-WHERE AREA_acres >= %s
-LIMIT 5)
+WHERE AREA_acres >= %s)
 
 SELECT
     template.id AS template_id,
     template.geom AS template_geom,
     ST_AsText(template.centroid_geom) AS geom_wkt,
-    dist AS distance_to_greenspace
-FROM template_grid_geo AS template
-CROSS JOIN LATERAL (
-  SELECT ST_Distance(template.centroid_geom, green.geom) AS dist,
-  template.geom
-  FROM green
-  WHERE ST_Intersects(template.centroid_geom, green.buffer100km2_geom)
-  -- WHERE ST_DWithin(template.centroid_geom, green.centroid_geom, .1)
-  ORDER BY dist
-  LIMIT 1
-) greenie;
+    MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
+FROM
+     -- template_grid_geo AS template
+    template_grid_geo AS template, green
+ -- JOIN green
+ -- ON ST_Intersects(template.centroid_geom, green.buffer100km_geom)
+   -- WHERE ST_DWithin(template.centroid_geom3310, green.centroid_geom3310, 10000)
+  --  WHERE ST_Intersects(template.centroid_geom, green.buffer100km_geom)
+GROUP BY
+    template.id, template.geom, template.centroid_geom;
 ")
-
-
 
 # tcon |> dbGetQuery(paste("EXPLAIN", nn_query))
 tcon |> dbGetQuery(sprintf(paste("EXPLAIN", nn_query), "130"))
@@ -415,38 +454,70 @@ tcon |> dbGetQuery(sprintf(paste("EXPLAIN", nn_query), "130"))
 # That's probably because it is in 3310 instead of 4326
 tcon |> dbExecute("
 SET memory_limit = '300GB';
-SET preserve_insertion_order = false;
+SET preserve_insertion_order = true;
+SET threads TO 20;
 ")
+
+# 130
 tic()
-tcon |> dbExecute(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s100km2 AS", nn_query), "130", "130"))
+tcon |> dbExecute(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "130", "130"))
 toc()
+# 10 without simplified geometry: 32 sec
+# 10 with simplified geometry: 28 sec
+tcon |>
+  tbl("grn_distance_grd_130_test") |>
+  # colnames()
+  distinct(distance_to_greenspace_meters) |>
+  arrange(distance_to_greenspace_meters)
+
 
 tic()
 tcon |> dbExecute(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "130", "130"))
 toc()
-# 634.365 sec
-
-
-x <- tcon |>
-  tbl("grn_distance_grd_130") |>
-  filter(distance_to_greenspace < .005) |>
-  collect() |>
-  st_as_sf(wkt = "geom_wkt")
+# 4.75 hrs
 
 slope.sr <- rast("data/predictors/slope.tif")
 empty.sr <- rast(slope.sr[[1]])
 tcon |> dbListTables()
 y <- tcon |>
-  tbl("grn_distance_grd_130100km2") |>
+  tbl("grn_distance_grd_130") |>
   collect() |>
   st_as_sf(wkt = "geom_wkt")
 
-greenspace_dist <- y |> rasterize(empty.sr, field = "distance_to_greenspace")
+greenspace_dist130 <- y |> rasterize(empty.sr, field = "distance_to_greenspace_meters")
+plot(greenspace_dist130)
+greenspace_dist130 |> writeRaster("data/predictors/130acre_greenspace_distance.tif")
+# write raster
+plot(greenspace_dist130)
+
+
+
+
+
+x <- tcon |>
+  tbl("grn_distance_grd_130_test") |>
+  filter(distance_to_greenspace_meters < 2000) |>
+  collect() |>
+  st_as_sf(wkt = "geom_wkt")
+
+
+
+slope.sr <- rast("data/predictors/slope.tif")
+empty.sr <- rast(slope.sr[[1]])
+tcon |> dbListTables()
+y <- tcon |>
+  tbl("grn_distance_grd_130") |>
+  collect() |>
+  st_as_sf(wkt = "geom_wkt")
+
+greenspace_dist <- y |> rasterize(empty.sr, field = "distance_to_greenspace_meters")
 
 plot(greenspace_dist)
 
-ggplot(x) +
-  geom_sf(aes(color = distance_to_greenspace))
+x |>
+  sample_n(10000) |>
+  ggplot() +
+  geom_sf(aes(color = distance_to_greenspace_meters))
 
 tcon |> db("
 EXPLAIN SELECT
@@ -463,45 +534,64 @@ GROUP BY
     template.id, template.geom;
 ")
 
+
+
+
+
+
+
+# Crawling back to postgis ---------------------------------------
 # Trying double run
 # Need this, the spatial index on grid is critical
 # IN METERS
-system.time({
-  con %>% dbExecute("
--- DROP TABLE IF EXISTS tempgrid;
-DROP TABLE IF EXISTS tempstreams;
-DROP TABLE IF EXISTS bay_area_stream_dist;
+library(RPostgreSQL)
+pcon <- dbConnect(RPostgreSQL::PostgreSQL(),
+  host = "flor",
+  port = 5432,
+  user = "postgres",
+  password = "postgres"
+)
 
-SELECT label, ST_TRANSFORM(ST_CURVETOLINE(cari_streams_raw.geom),3310) AS geom
-INTO tempstreams
-  FROM cari_streams_raw
-  JOIN bay_area_counties
-  ON ST_Intersects(cari_streams_raw.geom, bay_area_counties.geom)
-  AND label = 'Fluvial Natural';
+## Read in greenspace  ---------------------------------------
+grn <- st_read("data/predictor_prep/nlcd_greenspace_area.gpkg") |>
+  st_transform(3310)
 
-CREATE INDEX idx_tempstrms_geom ON tempstreams USING gist (geom);
+grn |>
+  rename_with(tolower) |>
+  st_write(pcon, layer = "nlcd_greenspace_area")
+
+tic()
+pcon %>% dbExecute("
+DROP TABLE IF EXISTS tempgreen;
+DROP TABLE IF EXISTS greenspace130_dist;
+
+CREATE TABLE tempgreen AS
+SELECT area_acres, nlcd_greenspace_area.geom
+  FROM nlcd_greenspace_area
+  --JOIN bay_area_counties
+  --ON ST_Intersects(nlcd_greenspace_area.geom, bay_area_counties.geom)
+  WHERE AREA_acres >= 130
+  LIMIT 1;
+
+CREATE INDEX idx_tempgrn_geom ON tempgreen USING gist (geom);
 
 -- Then do a nearest neighbor cross lateral join on grid cells and streams
-SELECT gr.geom AS ggeom, streams.geom AS sgeom, dist
-INTO TABLE bay_area_stream_dist
+CREATE TABLE greenspace130_dist AS
+SELECT gr.geom AS geom, greens.geom AS sgeom, dist
 FROM cub_bay_grid AS gr
 CROSS JOIN LATERAL (
-  SELECT streams.geom <-> gr.geom AS dist,
+  SELECT green.geom <-> gr.geom AS dist,
 	gr.geom
-  FROM tempstreams AS streams
+  FROM tempgreen AS green
   ORDER BY dist
   LIMIT 1
-) streams;
-
--- Clean up
--- DROP TABLE IF EXISTS tempgrid;
-DROP TABLE IF EXISTS tempstreams;
+) greens;
 ")
-})
+tic()
 # 40 minutes
 
-streamdist.sf <- con %>% st_read(query = "
-SELECT * FROM bay_area_stream_dist
+streamdist.sf <- pcon %>% st_read(query = "
+SELECT * FROM greenspace130_dist
 ")
 
 
