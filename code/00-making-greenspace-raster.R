@@ -240,7 +240,7 @@ greenspace_dist10 |> writeRaster("data/predictors/10acre_greenspace_distance.tif
 tic()
 tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "2", "2")))
 toc()
-#   hours
+#  7 hours
 
 sf_dist2 <- tcon |>
   tbl("grn_distance_grd_2") |>
