@@ -1,6 +1,3 @@
-terrestrial.sf <- st_read("~/Data/Boundaries/Political/CLN2.0/CLN_Database_2_0_1/data/Base/vector/terrestrial.shp")
-
-
 #  ---------------------------------------
 # Species occurrence data ---------------------------------------
 #  ---------------------------------------
@@ -14,13 +11,18 @@ library(tidyverse)
 library(RPostgreSQL)
 # library(starsExtra)
 library(terra)
+library(duckdb)
+library(dbplyr)
+
+terrestrial.sf <- st_read("~/Data/Boundaries/Political/CLN2.0/CLN_Database_2_0_1/data/Base/vector/terrestrial.shp")
 
 # sf_use_s2(T)
+target_counties <- c(
+  "Solano", "Contra Costa", "Alameda", "Santa Clara", "San Mateo",
+  "San Francisco", "Marin", "Sonoma", "Napa", "Santa Cruz"
+)
 counties.sf <- st_read("~/Data/Boundaries/Political/CA_Counties/CA_Counties_TIGER2016.shp") |>
-  filter(NAME %in% c(
-    "Solano", "Contra Costa", "Alameda", "Santa Clara", "San Mateo",
-    "San Francisco", "Marin", "Sonoma", "Napa", "Santa Cruz"
-  )) |>
+  filter(NAME %in% target_counties) |>
   st_transform(crs = 4326)
 target_counties.sf <-
   counties.sf |>
@@ -44,26 +46,51 @@ target.ewkt <-
   st_as_text(EWKT = T)
 
 # Now pull from local GBIF database
-con <- dbConnect(RPostgreSQL::PostgreSQL(),
-  host = "flor",
-  port = 5432,
-  user = "postgres",
-  password = "postgres"
-)
 
-species_names <- c("Taricha torosa")
+con <- dbConnect(duckdb(dbdir = "~/Data/Occurrences/GBIF/gbif.duckdb"))
+con |> dbExecute("install spatial; load spatial")
 
-bigquery <- paste0("
-SELECT * FROM ca_core
-INNER JOIN ca_species ON ca_species.taxonKey=ca_core.taxonKey
-INNER JOIN ca_extra ON ca_extra.gbifid=ca_core.gbifid
-WHERE ST_Intersects(ca_core.geom,'", target.ewkt, "')
-AND ca_species.taxonrank='SPECIES'
-AND ca_species.species IN ('", paste(species_names, collapse = "','"), "')")
+species_names <- c("Taricha torosa", "Callipepla californica", "Lynx rufus", "Pituophis catenifer")
 
-system.time({
-  target_spec.sf <- st_read(con, query = bigquery)
-})
+target_spec.df <- con |>
+  tbl("gbif") |>
+  filter(species %in% species_names) |>
+  inner_join(con |> tbl("join_lookup") |> filter(county_name %in% target_counties)) |>
+  collect()
+
+target_spec.sf <- target_spec.df |>
+  select(-geom) |>
+  mutate(across(where(is.list), ~ map_chr(., toString))) |>
+  st_as_sf(
+    coords = c("decimallongitude", "decimallatitude"),
+    remove = F,
+    crs = 4326,
+    sf_column_name = "geom"
+  )
+
+target_spec.sf |>
+  sample_n(10000) |>
+  ggplot() +
+  geom_sf(aes(color = species))
+# con <- dbConnect(RPostgreSQL::PostgreSQL(),
+#   host = "flor",
+#   port = 5432,
+#   user = "postgres",
+#   password = "postgres"
+# )
+
+# bigquery <- paste0("
+# SELECT * FROM ca_core
+# INNER JOIN ca_species ON ca_species.taxonKey=ca_core.taxonKey
+# INNER JOIN ca_extra ON ca_extra.gbifid=ca_core.gbifid
+# WHERE ST_Intersects(ca_core.geom,'", target.ewkt, "')
+# AND ca_species.taxonrank='SPECIES'
+# AND ca_species.species IN ('", paste(species_names, collapse = "','"), "')")
+
+# system.time({
+#   target_spec.sf <- st_read(con, query = bigquery)
+# })
+# target_spec.sf |> select(where(is.list))
 
 write_sf(target_spec.sf,
   paste0(
@@ -110,6 +137,7 @@ writeRaster(nlcd_imp.sr, "data/predictors/nlcd_impervious.tif", overwrite = T)
 nlcd_chr_pre <- rast("~/Data/Environment/NLCD/NLCD_ChristineCustom/nlcd_2019_land_cover_l48_20210604/nlcd_2019_land_cover_l48_20210604.img")
 
 nlcd_chr_pre |> unique()
+nlcd_chr_pre |> cats()
 
 # nlcd_chr2_pre <- rast("~/Data/Environment/NLCD/NLCD_ChristineCustom/nlcd_2001_2019_change_index_l48_20210604/nlcd_2001_2019_change_index_l48_20210604.img")
 
@@ -117,7 +145,58 @@ nlcd_chr_pre |> unique()
 # plot(nlcd_chr_pre)
 
 nlcd <- rast("data/predictors/nlcd_landcover.tif")
-# plot(nlcd)
+
+# Existing categories
+cats(nlcd)[[1]] |>
+  select(`NLCD Land Cover Class`) |>
+  filter(`NLCD Land Cover Class` != "")
+
+# Reclassify according to Christine's bins
+new_cats <- c(
+  "no data" = 0,
+  "undeveloped land cover classes" = 1,
+  "developed: open space" = 2,
+  "developed: low intensity" = 3,
+  "developed: med intensity" = 4,
+  "developed: high intensity" = 5
+) |> enframe(name = "new_category", value = "new_value")
+
+old_cats <- levels(nlcd)[[1]]
+
+# Define the mapping of old categories to new categories
+category_mapping <- c(
+  "Unclassified" = NA,
+  "Open Water" = NA, # "undeveloped land cover classes",
+  "Perennial Snow/Ice" = "undeveloped land cover classes",
+  "Developed, Open Space" = "developed: open space",
+  "Developed, Low Intensity" = "developed: low intensity",
+  "Developed, Medium Intensity" = "developed: med intensity",
+  "Developed, High Intensity" = "developed: high intensity",
+  "Barren Land" = "undeveloped land cover classes",
+  "Deciduous Forest" = "undeveloped land cover classes",
+  "Evergreen Forest" = "undeveloped land cover classes",
+  "Mixed Forest" = "undeveloped land cover classes",
+  "Shrub/Scrub" = "undeveloped land cover classes",
+  "Herbaceous" = "undeveloped land cover classes",
+  "Hay/Pasture" = "developed: open space",
+  "Cultivated Crops" = "developed: open space",
+  "Woody Wetlands" = "undeveloped land cover classes",
+  "Emergent Herbaceous Wetlands" = "undeveloped land cover classes"
+) |> enframe(name = "NLCD Land Cover Class", value = "new_category")
+
+reclass_df <- old_cats |>
+  left_join(category_mapping) |>
+  left_join(new_cats)
+
+# Assign new categories
+nlcd_reclass <- classify(nlcd, reclass_df |> select(value, new_value), others = 0)
+
+levels(nlcd_reclass) <- new_cats |> select(value = new_value, "NLCD Land Cover ReClass" = new_category)
+
+plot(nlcd_reclass)
+# Looks great
+
+nlcd_reclass |> writeRaster("data/predictors/nlcd_reclass_landcover.tif")
 
 # CES Pollutants and Traffic ---------------------------------------
 ces.sf <- read_sf("~/Data/Environment/CalEnviroScreen4.0/calenviroscreen40gdb_F_2021.gdb/")

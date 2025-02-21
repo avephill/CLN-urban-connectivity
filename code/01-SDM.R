@@ -8,6 +8,7 @@ library(SDMtune)
 library(furrr)
 library(RPostgreSQL)
 library(vscDebugger)
+library(sf)
 # .vsc.listen()
 
 # bioclim_dic <- read_csv("../../../Data/Dictionaries/bioclim_dictionary.csv")
@@ -24,7 +25,7 @@ sdm_train_mask.sf <- terrestrial.sf
 #                       format(Sys.time(), "%Y-%m-%d"),
 #                       "_newvars/")
 
-results.dir <- "results/sdm/run-2024-07-24_newvars/"
+results.dir <- "results/sdm/run-2025-01-21_new-species/"
 
 dir.create(results.dir, recursive = TRUE)
 
@@ -52,8 +53,12 @@ list.files("data/predictors")
 predictor_names <- c(
   "altitude", "slope", "solarradiation",
   "vegetation",
-  "nlcd_landcover", "nlcd_treecover",
-  "wetland_fresh_distance", "greenspace10acre_distance", "natural-stream-dist",
+  # "nlcd_landcover",
+  "nlcd_reclass_landcover",
+  "nlcd_treecover",
+  "wetland_fresh_distance", "natural-stream-dist",
+  "2acre_greenspace_distance", "10acre_greenspace_distance",
+  "30acre_greenspace_distance", "75acre_greenspace_distance", "130acre_greenspace_distance",
   "nlcd_impervious", "CES_traffic", "CES_pollution"
   # "ces"
   # "soils_suborder" # incomplete data
@@ -71,13 +76,17 @@ name_change.df <-
   tibble(RAWNAME = names(predictors.sr)) |>
   mutate(DERNAME = case_when(
     RAWNAME == "dem30m_ba_reg" ~ "Elevation",
-    RAWNAME == "distance_to_greenspace" ~ "Distance to 10acre Greenspace",
+    RAWNAME == "greenspace_dist2" ~ "Min Distance to 2acre Greenspace",
+    RAWNAME == "greenspace_dist10" ~ "Min Distance to 10acre Greenspace",
+    RAWNAME == "greenspace_dist30" ~ "Min Distance to 30acre Greenspace",
+    RAWNAME == "greenspace_dist75" ~ "Min Distance to 75acre Greenspace",
+    RAWNAME == "greenspace_dist130" ~ "Min Distance to 130acre Greenspace",
     RAWNAME == "Tree Cover" ~ "NLCD Percent Tree Cover",
     RAWNAME == "prcnt_slope30" ~ "Percent Slope Grade",
     RAWNAME == "aspect" ~ "Slope Aspect",
     RAWNAME == "CLN2_VEGETATION." ~ "Eveg Vegetation Class",
-    RAWNAME == "DIST" ~ "Distance to Standing Freshwater",
-    RAWNAME == "natural-stream-dist" ~ "Distance to Freshwater Stream",
+    RAWNAME == "DIST" ~ "Min Distance to Standing Freshwater",
+    RAWNAME == "natural-stream-dist" ~ "Min Distance to Freshwater Stream",
     T ~ RAWNAME
   )) |>
   mutate(DERNAME = str_replace_all(DERNAME, " ", "_"))
@@ -103,11 +112,11 @@ set.cats(predictors.sr,
 )
 
 # Fix NLCD
-target.layer <- which(name_change.df$DERNAME == "NLCD_Land_Cover_Class")
+target.layer <- which(name_change.df$DERNAME == "NLCD_Land_Cover_ReClass")
 cat_table <- cats(predictors.sr)[[target.layer]]
 names(cat_table) <- cats(predictors.sr)[[target.layer]] |>
   names() |>
-  str_replace_all("NLCD Land Cover Class", "NLCD_Land_Cover_Class")
+  str_replace_all("NLCD Land Cover ReClass", "NLCD_Land_Cover_ReClass")
 
 set.cats(predictors.sr,
   layer = target.layer,
@@ -120,17 +129,21 @@ writeRaster(predictors.sr, paste0(results.dir, "predictors.tif"),
   overwrite = T, progress = T
 )
 
-
+plot(predictors.sr |> subset("Min_Distance_to_130acre_Greenspace"))
 
 # # Look at some correlation
-# predictor.df <- predictors.sr  |> as.data.frame()
-# predictor.tb <- predictor.df |> tibble() |>
-# 	select_if(is.numeric) |>
-# 	drop_na()
-# cor.test(predictor.tb)
-# pred_cor <- cor(predictor.tb, method = c("pearson"))
-#
-# pred_cor |> write.csv("../results/sdm/predictor_coll.csv")
+# library(corrr)
+
+# predictor.tb <- predictors.sr |>
+#   as.data.frame() |>
+#   tibble() |>
+#   select_if(is.numeric) |>
+#   drop_na()
+
+# pred_cor <- predictor.tb |> correlate(method = "pearson")
+# View(pred_cor)
+
+# pred_cor |> write.csv(paste0(results.dir, "predictor_coll.csv"))
 
 
 # -------------------------------------------------------------------------
@@ -140,7 +153,7 @@ writeRaster(predictors.sr, paste0(results.dir, "predictors.tif"),
 # -------------------------------------------------------------------------
 
 
-spec.sf <- st_read("data/occurrence/2024-07-16_target_spec.gpkg")
+spec.sf <- st_read("./data/occurrence/2025-01-21_target_spec.gpkg")
 
 spec_intersect.sf <- spec.sf |>
   st_intersection(sdm_train_mask.sf |> st_transform(st_crs(spec.sf)))
@@ -149,8 +162,10 @@ spec_cleaned.sf <-
   spec_intersect.sf |>
   as_tibble() |>
   # Necessary to let the defaults work
-  rename(decimalLongitude = decimallongitude,
-         decimalLatitude = decimallatitude) |> 
+  rename(
+    decimalLongitude = decimallongitude,
+    decimalLatitude = decimallatitude
+  ) |>
   # Identify Invalid lat/lon Coordinates
   cc_val() |>
   # Identify Records with Identical lat/lon
@@ -173,8 +188,10 @@ spec_cleaned.sf <-
   # cc_outl() |>
   # Identify Duplicated Records
   # cc_dupl()
-  rename(decimallongitude = decimalLongitude,
-         decimallatitude = decimalLatitude) |> 
+  rename(
+    decimallongitude = decimalLongitude,
+    decimallatitude = decimalLatitude
+  ) |>
   filter(coordinateuncertaintyinmeters <= 250 | is.na(coordinateuncertaintyinmeters)) |>
   filter(basisofrecord == "HUMAN_OBSERVATION" |
     basisofrecord == "OBSERVATION" |
@@ -185,10 +202,12 @@ spec_cleaned.sf <-
     # coords = c("decimallongitude", "decimallatitude"),
     # crs = st_crs(spec.sf),
     sf_column_name = "geom"
-  )
+  ) |>
+  filter(year > 2000)
 
-# Removed point count
-nrow(spec_intersect.sf) - nrow(spec_cleaned.sf)
+# Percent of records removed
+100 * (nrow(spec_intersect.sf) - nrow(spec_cleaned.sf)) / nrow(spec_intersect.sf)
+
 
 write_sf(spec_cleaned.sf, paste0(results.dir, "spec_obs.gpkg"))
 
@@ -200,7 +219,7 @@ spec_thinned.sf <- spec_cleaned.sf |>
   mutate(cell = cellFromXY(predictors.sr, st_coordinates(spec_cleaned.sf))) |>
   group_by(cell) |>
   # slice(1) |>
-  sample_n(1) |> 
+  sample_n(1) |>
   ungroup() |>
   st_as_sf()
 
@@ -407,7 +426,7 @@ trainSDM <- function(spec, input_obs) {
       a = sp_extract.sf |> filter(Y == 0) |> st_coordinates(),
       env = predictor.stack,
       categorical = c(
-        "NLCD_Land_Cover_Class",
+        "NLCD_Land_Cover_ReClass",
         # "soil_suborder",
         "Eveg_Vegetation_Class"
       )
@@ -419,8 +438,6 @@ trainSDM <- function(spec, input_obs) {
 
     print("Training model...")
     model <- train(method = "Maxnet", data = data, folds = scv1)
-
-
 
     sdm_prediction <-
       predict(model,
@@ -444,7 +461,10 @@ trainSDM <- function(spec, input_obs) {
   }
 }
 
-trainSDM(species, spec_thinned.sf)
+for (spec in species) {
+  trainSDM(spec, input_obs = spec_thinned.sf)
+}
+
 
 # For parallel training of multiple species if needed
 # safeSDM <- safely(.f = trainSDM)

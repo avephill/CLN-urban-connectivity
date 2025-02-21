@@ -49,7 +49,6 @@ library(glue)
 library(tictoc)
 library(duckdbfs)
 library(dplyr)
-library(fasterize)
 
 tcon <- dbConnect(duckdb("data/greenspaces/temp.duckdb"))
 tcon |> dbExecute("install spatial; load spatial")
@@ -182,12 +181,13 @@ sf_dist130 <- tcon |>
 
 greenspace_dist130 <- sf_dist130 |>
   rasterize(empty.sr,
-    field = "distance_to_greenspace_meters",
-    fun = "min"
+    field = "distance_to_greenspace_meters"
   )
-plot(greenspace_dist130)
-greenspace_dist130 |> writeRaster("data/predictors/130acre_greenspace_distance.tif", overwrite = T)
 
+names(greenspace_dist130) <- "greenspace_dist130"
+# plot(greenspace_dist130)
+greenspace_dist130 |> writeRaster("data/predictors/130acre_greenspace_distance.tif", overwrite = T)
+rast("data/predictors/130acre_greenspace_distance.tif") |> names()
 
 # 75
 tic()
@@ -200,6 +200,7 @@ greenspace_dist75 <- tcon |>
   collect() |>
   st_as_sf(wkt = "geom_wkt") |>
   rasterize(empty.sr, field = "distance_to_greenspace_meters")
+names(greenspace_dist75) <- "greenspace_dist75"
 plot(greenspace_dist75)
 greenspace_dist75 |> writeRaster("data/predictors/75acre_greenspace_distance.tif", overwrite = T)
 
@@ -216,8 +217,13 @@ sf_dist30 <- tcon |>
 
 greenspace_dist30 <- sf_dist30 |>
   rasterize(empty.sr, field = "distance_to_greenspace_meters")
+# greenspace_dist30 <- rast("data/predictors/30acre_greenspace_distance.tif")
+names(greenspace_dist30) <- "greenspace_dist30"
 plot(greenspace_dist30)
-greenspace_dist30 |> writeRaster("data/predictors/30acre_greenspace_distance.tif", overwrite = T)
+greenspace_dist30 |> writeRaster("data/predictors/30acre_greenspace_distance.tif",
+  overwrite = T
+)
+
 
 # 10
 tic()
@@ -232,6 +238,9 @@ sf_dist10 <- tcon |>
 
 greenspace_dist10 <- sf_dist10 |>
   rasterize(empty.sr, field = "distance_to_greenspace_meters")
+
+# greenspace_dist10 <- rast("data/predictors/10acre_greenspace_distance.tif")
+names(greenspace_dist10) <- "greenspace_dist10"
 plot(greenspace_dist10)
 greenspace_dist10 |> writeRaster("data/predictors/10acre_greenspace_distance.tif", overwrite = T)
 
@@ -249,5 +258,208 @@ sf_dist2 <- tcon |>
 
 greenspace_dist2 <- sf_dist2 |>
   rasterize(empty.sr, field = "distance_to_greenspace_meters")
+
+# greenspace_dist2 <- rast("data/predictors/2acre_greenspace_distance.tif")
+names(greenspace_dist2) <- "greenspace_dist2"
+
+
 plot(greenspace_dist2)
 greenspace_dist2 |> writeRaster("data/predictors/2acre_greenspace_distance.tif", overwrite = T)
+
+
+# Make essential-only greenspace ---------------------------------------
+# Just in the cities
+
+# Add cities shapefile so that we can limit the grid just to cities
+# City boundaries
+city_boundaries_prep <- st_read("data/BayAreaCities_CLN.gpkg")
+
+city_boundaries <- city_boundaries_prep |>
+  filter(jurname %in% c("Oakland", "Piedmont")) |>
+  summarise(jurname = "Oakland_Piedmont", geom = st_union(geom)) |>
+  bind_rows(city_boundaries_prep |>
+    filter(jurname %in% c("San Jose", "San Francisco"))) |>
+  st_transform(4326) |>
+  mutate(geom_wkt = st_as_text(geom, EWKT = T))
+
+plot(city_boundaries |> st_geometry())
+
+tcon |> copy_to(
+  city_boundaries |> tibble() |> select(jurname, geom_wkt),
+  name = "baycities",
+  overwrite = T
+)
+
+# tcon |> dbExecute("CREATE INDEX baycityindx ON baycities USING RTREE (geom)")
+
+tcon |> dbExecute("
+CREATE OR REPLACE TABLE template_grid_cities
+AS
+SELECT *
+FROM template_grid_geo, baycities
+WHERE ST_Intersects(template_grid_geo.geom, ST_GeomFromText(baycities.geom_wkt));
+
+CREATE INDEX idx_templatecities_geom ON template_grid_cities USING RTREE (geom);
+CREATE INDEX idx_tmp_centroidcities_geom ON template_grid_cities USING RTREE (centroid_geom);
+")
+
+tcon |> tbl("baycities")
+tic()
+tcon |> dbExecute("SELECT *
+FROM template_grid_geo, baycities
+WHERE ST_Intersects(template_grid_geo.geom, ST_GeomFromText(baycities.geom_wkt))")
+toc()
+
+# Now add essential-only greenspace
+
+# At the scale of each city, not regional
+og_grn <- st_read("data/greenspaces/christine/Greenspaces/GreenSpace_Nov2024.shp")
+
+city_greenspace <- og_grn |>
+  filter(Final_CLN2 %in% c(c("Essential", "Contributor", "Important"))) |>
+  st_transform(4326) |>
+  rename(geom = geometry) |>
+  st_make_valid() |>
+  mutate(
+    area_acres = st_area(geom) |> set_units("acre")
+  )
+# st_cast("POLYGON") |>
+# mutate(geom_wkt = st_as_text(geometry))
+
+city_greenspace |> write_sf("data/greenspaces/city_greenspace.gpkg")
+
+tcon |> dbExecute("
+CREATE OR REPLACE TABLE essential_greenspace
+AS
+SELECT * EXCLUDE geom,
+  grn.geom,
+  ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true) AS geom3310,
+  ST_TRANSFORM(ST_Centroid(grn.geom), 'EPSG:4326', 'EPSG:3310', always_xy := true) AS centroid_geom3310,
+  ST_Centroid(grn.geom) AS centroid_geom,
+  ST_SimplifyPreserveTopology(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true), 5000) AS simple_geom3310
+FROM ST_READ('data/greenspaces/city_greenspace.gpkg') AS grn
+WHERE Final_CLN2 = 'Essential';
+
+CREATE INDEX idx_grn_ess_geom ON essential_greenspace USING RTREE (geom);
+CREATE INDEX idx_grn_ess_centroid_geom ON essential_greenspace USING RTREE (centroid_geom);
+CREATE INDEX idx_grn_ess_simple_geom ON essential_greenspace USING RTREE (simple_geom3310);
+CREATE INDEX idx_grn_ess_cent3310_geom ON essential_greenspace USING RTREE (centroid_geom3310);
+")
+
+tcon |>
+  tbl("essential_greenspace") |>
+  distinct(Final_CLN2)
+# good
+
+nness_query <- glue("
+WITH green AS
+(SELECT * FROM essential_greenspace
+WHERE area_acres >= %s)
+
+SELECT
+    template.id AS template_id,
+    template.geom AS template_geom,
+    ST_AsText(template.centroid_geom) AS geom_wkt,
+    MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
+FROM
+    template_grid_cities AS template, green
+GROUP BY
+    template.id, template.geom, template.centroid_geom;
+")
+
+slope.sr <- rast("data/predictors/slope.tif")
+empty.sr <- rast(slope.sr[[1]])
+
+makeEssentialDistance <- function(min_greenspace_size) {
+  tic()
+  tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE essential_greenspace_dist_%s AS", nness_query), min_greenspace_size, min_greenspace_size)))
+  toc()
+
+  sf_dist <- tcon |>
+    tbl(paste0("essential_greenspace_dist_", min_greenspace_size)) |>
+    collect() |>
+    st_as_sf(wkt = "geom_wkt")
+
+  greenspace_dist <- sf_dist |>
+    rasterize(empty.sr, field = "distance_to_greenspace_meters")
+
+  names(greenspace_dist) <- paste0("essential_greenspace_dist", min_greenspace_size)
+
+  greenspace_dist |>
+    writeRaster(sprintf(
+      "data/predictors/%sacre_essential_greenspace_distance.tif",
+      min_greenspace_size
+    ), overwrite = T)
+}
+
+
+c(130, 75, 30, 10, 2) |> map(makeEssentialDistance)
+
+# Checking
+rast("data/predictors/130acre_essential_greenspace_distance.tif") |> plot()
+rast("data/predictors/2acre_essential_greenspace_distance.tif") |> plot()
+
+
+# City-only all greenspace ---------------------------------------
+#' I need to make the greenspace distance rasters for all greenspaces in the city
+#' specifically because if I just crop the regional one it will have higher values
+#' at the edges. I need to measure distances just from internal greenspaces
+
+tcon |> dbExecute("
+CREATE OR REPLACE TABLE city_all_greenspace
+AS
+SELECT greenspace_geo.*
+FROM greenspace_geo, baycities
+WHERE ST_Intersects(greenspace_geo.geom, ST_GeomFromText(baycities.geom_wkt));
+
+CREATE INDEX idx_city_all_greenspace_geom ON city_all_greenspace USING RTREE (geom);
+CREATE INDEX idx_city_all_greenspace_centroid_geom ON city_all_greenspace USING RTREE (centroid_geom);
+CREATE INDEX idx_city_all_greenspace_simple_geom ON city_all_greenspace USING RTREE (simple_geom3310);
+CREATE INDEX idx_city_all_greenspace_cent3310_geom ON city_all_greenspace USING RTREE (centroid_geom3310);
+")
+
+nncityall_query <- glue("
+WITH green AS
+(SELECT * FROM city_all_greenspace
+WHERE area_acres >= %s)
+
+SELECT
+    template.id AS template_id,
+    template.geom AS template_geom,
+    ST_AsText(template.centroid_geom) AS geom_wkt,
+    MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
+FROM
+    template_grid_cities AS template, green
+GROUP BY
+    template.id, template.geom, template.centroid_geom;
+")
+
+makeAllCityDistance <- function(min_greenspace_size) {
+  tic()
+  tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE city_all_greenspace_dist_%s AS", nncityall_query), min_greenspace_size, min_greenspace_size)))
+  toc()
+
+  sf_dist <- tcon |>
+    tbl(paste0("city_all_greenspace_dist_", min_greenspace_size)) |>
+    collect() |>
+    st_as_sf(wkt = "geom_wkt")
+
+  greenspace_dist <- sf_dist |>
+    rasterize(empty.sr, field = "distance_to_greenspace_meters")
+
+  names(greenspace_dist) <- paste0("city_all_greenspace_dist", min_greenspace_size)
+
+  greenspace_dist |>
+    writeRaster(sprintf(
+      "data/predictors/%sacre_city_all_greenspace_dist.tif",
+      min_greenspace_size
+    ), overwrite = T)
+}
+
+c(130, 75, 30, 10, 2) |> map(makeAllCityDistance)
+
+rast(c(
+  "data/predictors/130acre_city_all_greenspace_dist.tif",
+  "data/predictors/2acre_city_all_greenspace_dist.tif"
+)) |> plot()
+# Looks good

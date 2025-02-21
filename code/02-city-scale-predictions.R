@@ -5,7 +5,7 @@
 
 
 
-sdm_results_path <- "results/sdm/run-2024-11-22_addgreenspace/"
+sdm_results_path <- "results/sdm/run-2025-01-21_new-species/"
 
 # City boundaries
 city_boundaries_prep <- st_read("data/BayAreaCities_CLN.gpkg")
@@ -117,24 +117,28 @@ library(maxnet)
 library(glmnet)
 library(SDMtune)
 
-sdm_mod <- readRDS(paste0(sdm_results_path, "Taricha_torosa/sdm_model.rds"))
+species <- c("Callipepla_californica", "Lynx_rufus", "Pituophis_catenifer")
+map(species, function(x) {
+  # browser()
+  sdm_mod <- readRDS(paste0(sdm_results_path, x, "/sdm_model.rds"))
 
-sdm_allgreen_prediction <-
-  predict(sdm_mod,
-    data = city_allgrn_predictors,
-    type = "cloglog",
-    cores = 5
-  )
+  sdm_allgreen_prediction <-
+    predict(sdm_mod,
+      data = city_allgrn_predictors,
+      type = "cloglog",
+      cores = 5
+    )
 
-sdm_essential_prediction <-
-  predict(sdm_mod,
-    data = city_predictors_essential,
-    type = "cloglog",
-    cores = 5
-  )
+  sdm_essential_prediction <-
+    predict(sdm_mod,
+      data = city_predictors_essential,
+      type = "cloglog",
+      cores = 5
+    )
 
-plot(sdm_essential_prediction)
-plot(sdm_allgreen_prediction)
+  plot(sdm_essential_prediction)
+  plot(sdm_allgreen_prediction)
 
-sdm_essential_prediction |> writeRaster(paste0(sdm_results_path, "grncity_essential_prediction.tif"), overwrite = T)
-sdm_allgreen_prediction |> writeRaster(paste0(sdm_results_path, "grncity_all_prediction.tif"), overwrite = T)
+  sdm_essential_prediction |> writeRaster(paste0(sdm_results_path, x, "/grncity_essential_prediction.tif"), overwrite = T)
+  sdm_allgreen_prediction |> writeRaster(paste0(sdm_results_path, x, "/grncity_all_prediction.tif"), overwrite = T)
+})
