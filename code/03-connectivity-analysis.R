@@ -100,7 +100,7 @@ maxtss_thresh <- thresh.df |>
 
 
 # Define the function for reclassification
-cost_function <- function(HSI, threshold) {
+costFunction <- function(HSI, threshold = maxtss_thresh) {
   # Use ifelse for vectorized operations
   ifelse(
     HSI > threshold, 1, # First condition: optimal habitat
@@ -111,7 +111,7 @@ cost_function <- function(HSI, threshold) {
 # Apply the function to essential greenspace prediction
 essential_prediction <- rast(paste0(sdm_results_path, "/grncity_essential_prediction.tif"))
 essential_resistance <- terra::app(essential_prediction,
-  fun = function(x) cost_function(x, maxtss_thresh)
+  fun = function(x) costFunction(x, maxtss_thresh)
 ) |>
   crop(city_bounds, mask = T) |>
   trim()
@@ -121,7 +121,7 @@ essential_resistance <- terra::app(essential_prediction,
 # Create resistance for all greenspace prediction
 city_allgrn_prediction <- rast(paste0(sdm_results_path, "/grncity_all_prediction.tif"))
 allgrn_resistance <- terra::app(city_allgrn_prediction,
-  fun = function(x) cost_function(x, maxtss_thresh)
+  fun = function(x) costFunction(x, maxtss_thresh)
 ) |>
   crop(city_bounds, mask = T) |>
   trim()
@@ -250,6 +250,9 @@ calc_lcp <- function(conductance) {
     exaggeration = FALSE
   )
 
+  mean(costFunction(values(conductance, na.rm = T)))
+  mean(values(conductance, na.rm = T))
+
   plan(multicore, workers = 10)
   lcp_paths <- future_map(1:nrow(suitable_cents), function(i) {
     lcp <- create_lcp(
@@ -307,9 +310,22 @@ calc_lcp <- function(conductance) {
 
 allgrn_conductance <- rast(paste0(results_dir, "/conductance_allgrn.tif"))
 essential_conductance <- rast(paste0(results_dir, "/conductance_essential.tif"))
-lcp_allgreen <- calc_lcp(allgrn_conductance |> mutate(mean = (.5 + mean)^2))
-lcp_essential <- calc_lcp(essential_conductance)
+# lcp_allgreen <- calc_lcp(allgrn_conductance)
+# lcp_essential <- calc_lcp(essential_conductance)
 
+lcp_allgreen <- allgrn_conductance |>
+  mutate(mean = 1 / costFunction(mean)) |>
+  calc_lcp()
+lcp_essential <- essential_conductance |>
+  mutate(mean = 1 / costFunction(mean)) |>
+  calc_lcp()
+
+# boxplot(1 / costFunction(values(allgrn_conductance, na.rm = T)))
+# boxplot(1 / values(allgrn_conductance, na.rm = T))
+
+# mean(costFunction(values(essential_conductance, na.rm = T)))
+# mean(values(essential_conductance, na.rm = T))
+# Figur out a 'cost function' for conductance or figure out how to input costFunction in create_cs
 
 agg_lcp <- bind_rows(
   lcp_allgreen$lcp_paths |> mutate(greenspace = "all"),
@@ -317,6 +333,8 @@ agg_lcp <- bind_rows(
 ) |>
   mutate(path_length = st_length(geometry)) |>
   filter(path_length > (0 |> set_units("m")))
+
+
 
 agg_lcp |> ggplot() +
   geom_boxplot(aes(x = greenspace, y = cost))
