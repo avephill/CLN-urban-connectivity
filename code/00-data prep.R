@@ -101,6 +101,41 @@ write_sf(target_spec.sf,
   layer = "spec_occ"
 )
 
+#  ---------------------------------------
+# City Boundaries ---------------------------------------
+#  ---------------------------------------
+
+# City boundaries
+city_boundaries_prep <- st_read("data/BayAreaCities_CLN.gpkg")
+
+city_boundaries_sf <- city_boundaries_prep |>
+  filter(jurname == "San Francisco") |>
+  st_cast("POLYGON") |>
+  mutate(new_area = st_area(geom)) |>
+  slice_max(order_by = new_area) %>%
+  st_crop(
+    st_bbox(.) %>%
+      (function(bb) {
+        bb["ymax"] <- 37.815
+        bb["xmin"] <- -122.53
+        bb["xmax"] <- -122.37
+        st_bbox(bb, crs = st_crs(.))
+      })
+  )
+
+city_boundaries_oak <- city_boundaries_prep |>
+  filter(jurname %in% c("Oakland", "Piedmont")) |>
+  summarise(jurname = "Oakland_Piedmont", geom = st_union(geom))
+
+city_boundaries <-
+  bind_rows(
+    city_boundaries_prep |>
+      filter(jurname %in% c("San Jose")),
+    city_boundaries_sf,
+    city_boundaries_oak
+  )
+
+city_boundaries |> write_sf("data/city_boundaries.gpkg")
 
 #  ---------------------------------------
 # Environmental data ---------------------------------------
