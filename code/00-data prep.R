@@ -270,10 +270,13 @@ writeRaster(ces_pollutant.sr, "data/predictors/CES_pollution.tif", overwrite = T
 
 ## Christine Greenspaces  ---------------------------------------
 # At the scale of each city, not regional
-og_grn <- st_read("data/greenspaces/christine/Greenspaces/GreenSpace_Nov2024.shp")
+og_grn <- st_read("data/greenspaces/christine/Greenspaces-2025") |>
+  st_zm(drop = T, what = "ZM")
 
 og_grn |>
   # filter(Final_CLN2 == "Urban") |>
+  filter(!(Final_CLN2 %in% c(c("Essential", "Contributor", "Important")))) |>
+  # filter(Final_CLN2 %in% c(c("Essential", "Contributor", "Important"))) |>
   ggplot() +
   geom_sf(aes(fill = Final_CLN2))
 og_grn |> distinct(Final_CLN2)
@@ -282,11 +285,18 @@ og_grn |>
   filter(if_any(where(is.character), ~ str_detect(., "Essential")))
 
 og_grn |>
-  filter(Final_CLN2 %in% c(c("Essential", "Contributor", "Important"))) |>
-  st_transform(3310) |>
-  st_cast("POLYGON") |>
-  mutate(geom_wkt = st_as_text(geometry)) |>
-  write_sf("data/greenspaces/city_greenspace.gpkg")
+  filter(COUNTY == "San Francisco") |>
+  plot()
+
+city_greenspace <- og_grn |>
+  # filter(Final_CLN2 %in% c(c("Essential", "Contributor", "Important"))) |>
+  st_transform(4326) |>
+  rename(geom = geometry) |>
+  st_make_valid() |>
+  mutate(
+    area_acres = st_area(geom) |> set_units("acre")
+  )
+city_greenspace |> write_sf("data/greenspaces/city_greenspace.gpkg")
 
 
 ## CLN Greenspaces  ---------------------------------------

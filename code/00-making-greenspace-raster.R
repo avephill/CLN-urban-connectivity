@@ -15,6 +15,7 @@ library(tidyverse)
 gs.sr <- rast("data/predictors/nlcd_greenspace.tif") |>
   project("epsg:4326")
 
+
 gs.sv <- as.polygons(gs.sr,
   aggregate = T,
   round = T,
@@ -266,23 +267,16 @@ names(greenspace_dist2) <- "greenspace_dist2"
 plot(greenspace_dist2)
 greenspace_dist2 |> writeRaster("data/predictors/2acre_greenspace_distance.tif", overwrite = T)
 
+#  ---------------------------------------
+# Make greenspaces for prediction from Christine's data ---------------------------------------
+# ---------------------------------------
 
 # Make essential-only greenspace ---------------------------------------
 # Just in the cities
 
 # Add cities shapefile so that we can limit the grid just to cities
 # City boundaries
-city_boundaries_prep <- st_read("data/BayAreaCities_CLN.gpkg")
-
-city_boundaries <- city_boundaries_prep |>
-  filter(jurname %in% c("Oakland", "Piedmont")) |>
-  summarise(jurname = "Oakland_Piedmont", geom = st_union(geom)) |>
-  bind_rows(city_boundaries_prep |>
-    filter(jurname %in% c("San Jose", "San Francisco"))) |>
-  st_transform(4326) |>
-  mutate(geom_wkt = st_as_text(geom, EWKT = T))
-
-plot(city_boundaries |> st_geometry())
+city_boundaries <- st_read("data/city_boundaries.gpkg")
 
 tcon |> copy_to(
   city_boundaries |> tibble() |> select(jurname, geom_wkt),
@@ -310,24 +304,13 @@ FROM template_grid_geo, baycities
 WHERE ST_Intersects(template_grid_geo.geom, ST_GeomFromText(baycities.geom_wkt))")
 toc()
 
-# Now add essential-only greenspace
 
-# At the scale of each city, not regional
-og_grn <- st_read("data/greenspaces/christine/Greenspaces/GreenSpace_Nov2024.shp")
-
-city_greenspace <- og_grn |>
-  filter(Final_CLN2 %in% c(c("Essential", "Contributor", "Important"))) |>
-  st_transform(4326) |>
-  rename(geom = geometry) |>
-  st_make_valid() |>
-  mutate(
-    area_acres = st_area(geom) |> set_units("acre")
-  )
-# st_cast("POLYGON") |>
-# mutate(geom_wkt = st_as_text(geometry))
-
-city_greenspace |> write_sf("data/greenspaces/city_greenspace.gpkg")
-
+# Create a table of essential greenspaces by:
+# 1. Reading the city greenspace data
+# 2. Filtering for only 'Essential' greenspaces
+# 3. Creating transformed geometries in EPSG:3310 (California State Plane III)
+# 4. Computing centroids and simplified geometries for spatial operations
+# 5. Creating spatial indexes for faster querying
 tcon |> dbExecute("
 CREATE OR REPLACE TABLE essential_greenspace
 AS
@@ -336,7 +319,7 @@ SELECT * EXCLUDE geom,
   ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true) AS geom3310,
   ST_TRANSFORM(ST_Centroid(grn.geom), 'EPSG:4326', 'EPSG:3310', always_xy := true) AS centroid_geom3310,
   ST_Centroid(grn.geom) AS centroid_geom,
-  ST_SimplifyPreserveTopology(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true), 5000) AS simple_geom3310
+  ST_SimplifyPreserveTopology(ST_MakeValid(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true)), 5000) AS simple_geom3310
 FROM ST_READ('data/greenspaces/city_greenspace.gpkg') AS grn
 WHERE Final_CLN2 = 'Essential';
 
@@ -346,11 +329,13 @@ CREATE INDEX idx_grn_ess_simple_geom ON essential_greenspace USING RTREE (simple
 CREATE INDEX idx_grn_ess_cent3310_geom ON essential_greenspace USING RTREE (centroid_geom3310);
 ")
 
+
 tcon |>
   tbl("essential_greenspace") |>
-  distinct(Final_CLN2)
+  select(area_acres)
 # good
 
+# Query to calculate minimum distance from each grid cell to essential greenspaces of specified size
 nness_query <- glue("
 WITH green AS
 (SELECT * FROM essential_greenspace
@@ -370,9 +355,14 @@ GROUP BY
 slope.sr <- rast("data/predictors/slope.tif")
 empty.sr <- rast(slope.sr[[1]])
 
+# Function to create a distance raster showing minimum distance to essential
+# greenspaces of a given minimum size using nness_query
 makeEssentialDistance <- function(min_greenspace_size) {
   tic()
-  tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE essential_greenspace_dist_%s AS", nness_query), min_greenspace_size, min_greenspace_size)))
+  tcon |> dbExecute(glue(sprintf(
+    paste("CREATE OR REPLACE TABLE essential_greenspace_dist_%s AS", nness_query),
+    min_greenspace_size, min_greenspace_size
+  )))
   toc()
 
   sf_dist <- tcon |>
@@ -392,7 +382,7 @@ makeEssentialDistance <- function(min_greenspace_size) {
     ), overwrite = T)
 }
 
-
+# do it for all distances
 c(130, 75, 30, 10, 2) |> map(makeEssentialDistance)
 
 # Checking
@@ -408,15 +398,20 @@ rast("data/predictors/2acre_essential_greenspace_distance.tif") |> plot()
 tcon |> dbExecute("
 CREATE OR REPLACE TABLE city_all_greenspace
 AS
-SELECT greenspace_geo.*
-FROM greenspace_geo, baycities
-WHERE ST_Intersects(greenspace_geo.geom, ST_GeomFromText(baycities.geom_wkt));
+SELECT * EXCLUDE geom,
+  grn.geom,
+  ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true) AS geom3310,
+  ST_TRANSFORM(ST_Centroid(grn.geom), 'EPSG:4326', 'EPSG:3310', always_xy := true) AS centroid_geom3310,
+  ST_Centroid(grn.geom) AS centroid_geom,
+  ST_SimplifyPreserveTopology(ST_MakeValid(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true)), 5000) AS simple_geom3310
+FROM ST_READ('data/greenspaces/city_greenspace.gpkg') AS grn;
 
-CREATE INDEX idx_city_all_greenspace_geom ON city_all_greenspace USING RTREE (geom);
-CREATE INDEX idx_city_all_greenspace_centroid_geom ON city_all_greenspace USING RTREE (centroid_geom);
-CREATE INDEX idx_city_all_greenspace_simple_geom ON city_all_greenspace USING RTREE (simple_geom3310);
-CREATE INDEX idx_city_all_greenspace_cent3310_geom ON city_all_greenspace USING RTREE (centroid_geom3310);
+CREATE INDEX idx_grn_all_geom ON city_all_greenspace USING RTREE (geom);
+CREATE INDEX idx_grn_all_centroid_geom ON city_all_greenspace USING RTREE (centroid_geom);
+CREATE INDEX idx_grn_all_simple_geom ON city_all_greenspace USING RTREE (simple_geom3310);
+CREATE INDEX idx_grn_all_cent3310_geom ON city_all_greenspace USING RTREE (centroid_geom3310);
 ")
+
 
 nncityall_query <- glue("
 WITH green AS
