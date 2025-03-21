@@ -6,22 +6,134 @@ library(sf)
 library(units)
 
 
-# results_path <- "results/connectivity/2025-01-20_checking-problems/"
+results_path <- "results/connectivity/2025-03-18_lcp-new-greenspace"
 
 
-target_species <- c("Callipepla_californica", "Lynx_rufus")
+target_species <- c("Callipepla_californica", "Lynx_rufus", "Pituophis_catenifer")
 
-spec_plots <- map(target_species, function(spec) {
-  results_path <- sprintf("results/connectivity/2025-02-24_lcp_addspec/%s", spec)
+
+boxplots_n_means <- map(target_species, function(spec) {
+  result_path <- sprintf("%s/%s", results_path, spec)
 
   # City boundaries
   city_boundaries_prep <- st_read("data/city_boundaries.gpkg")
+  # browser()
+  lcp_allgreen <- st_read(sprintf("%s/paths_allgreen.gpkg", result_path))
+  lcp_esssential <- st_read(sprintf("%s/paths_essential.gpkg", result_path))
 
-  lcp_allgreen <- st_read(sprintf("./results/connectivity/2025-02-24_lcp_addspec/%s/paths_allgreen.gpkg", spec))
-  lcp_esssential <- st_read(sprintf("./results/connectivity/2025-02-24_lcp_addspec/%s/paths_essential.gpkg", spec))
+  lcp_dens_allgreen <- rast(sprintf("%s/path_density_allgreen.tif", result_path))
+  lcp_dens_essential <- rast(sprintf("%s/path_density_essential.tif", result_path))
 
-  lcp_dens_allgreen <- rast(sprintf("./results/connectivity/2025-02-24_lcp_addspec/%s/path_density_allgreen.tif", spec))
-  lcp_dens_essential <- rast(sprintf("./results/connectivity/2025-02-24_lcp_addspec/%s/path_density_essential.tif", spec))
+  agg_lcp <- bind_rows(
+    lcp_allgreen |> mutate(greenspace = "all"),
+    lcp_esssential |> mutate(greenspace = "essential")
+  ) |>
+    mutate(path_length = st_length(geom)) |>
+    filter(path_length > (0 |> set_units("m")))
+
+  bb_pathcost.plt <- agg_lcp |> ggplot() +
+    geom_boxplot(aes(x = greenspace, y = cost), 
+                 fill = "lightgray",
+                 alpha = 0.7,
+                 outlier.color = "steelblue",
+                 outlier.alpha = 0.5) +
+    stat_summary(aes(x = greenspace, y = cost),
+      fun = mean,
+      geom = "point",
+      color = "red",
+      size = 3,
+      shape = 18
+    ) +
+    stat_summary(aes(x = greenspace, y = cost),
+      fun.data = mean_cl_normal,
+      geom = "errorbar",
+      width = 0.2,
+      color = "red"
+    ) +
+    scale_x_discrete(labels = c("all" = "All Greenspaces", "essential" = "Essential Only")) +
+    labs(x = "Greenspace Type",
+         y = "Path Cost",
+         title = "Path Cost Distribution") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+      axis.title = element_text(size = 10),
+      axis.text = element_text(size = 9),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank()
+    )
+
+  bb_pathlength.plt <- agg_lcp |> ggplot() +
+    geom_boxplot(aes(x = greenspace, y = path_length),
+                 fill = "lightgray",
+                 alpha = 0.7,
+                 outlier.color = "steelblue",
+                 outlier.alpha = 0.5) +
+    stat_summary(aes(x = greenspace, y = path_length),
+      fun = mean,
+      geom = "point",
+      color = "red",
+      size = 3,
+      shape = 18
+    ) +
+    stat_summary(aes(x = greenspace, y = path_length),
+      fun.data = mean_cl_normal,
+      geom = "errorbar",
+      width = 0.2,
+      color = "red"
+    ) +
+    scale_x_discrete(labels = c("all" = "All Greenspaces", "essential" = "Essential Only")) +
+    labs(x = "Greenspace Type",
+         y = "Path Length (m)",
+         title = "Path Length Distribution") +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+      axis.title = element_text(size = 10),
+      axis.text = element_text(size = 9),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank()
+    )
+
+  # max_dens_val <- max(c(
+  #   values(lcp_dens_allgreen),
+  #   values(lcp_dens_essential)
+  # ), na.rm = T)
+
+# LCP Density
+#   lcp_dens_allgreen
+# lcp_dens_essential
+  
+
+  return(list(
+    bb_pathcost.plt = bb_pathcost.plt,
+    bb_pathlength.plt = bb_pathlength.plt#,
+    # all_map.plt = all_map.plt,
+    # ess_map.plt = ess_map.plt
+  ))
+})
+
+boxplots_n_means |>
+  list_flatten() |>
+  wrap_plots(ncol = 2, widths = c(1, 1)) +
+  plot_annotation(tag_levels = list(target_species |> map(~ c(.x, "")) |> flatten_chr()))
+
+
+
+
+
+# This is old and includes maps
+boxplots_n_maps <- map(target_species, function(spec) {
+  result_path <- sprintf("%s/%s", results_path, spec)
+
+  # City boundaries
+  city_boundaries_prep <- st_read("data/city_boundaries.gpkg")
+# browser()
+  lcp_allgreen <- st_read(sprintf("%s/paths_allgreen.gpkg", result_path))
+  lcp_esssential <- st_read(sprintf("%s/paths_essential.gpkg", result_path))
+
+  lcp_dens_allgreen <- rast(sprintf("%s/path_density_allgreen.tif", result_path))
+  lcp_dens_essential <- rast(sprintf("%s/path_density_essential.tif", result_path))
 
   agg_lcp <- bind_rows(
     lcp_allgreen |> mutate(greenspace = "all"),
@@ -73,13 +185,20 @@ spec_plots <- map(target_species, function(spec) {
 names(spec_plots) <- target_species
 
 spec_plots$Callipepla_californica$bb_pathcost.plt
+
+# Full plot
 spec_plots |>
   list_flatten() |>
   wrap_plots(ncol = 4, widths = c(1, 1, 2, 2))
 
-spec_plots$Callipepla_californica |>
-  list_flatten() |>
-  wrap_plots(nrol = 4, heights = 1)
+dens_list <- map(spec_plots, ~ list(
+  all_map.plt = .x$all_map.plt,
+  ess_map.plt = .x$ess_map.plt
+))
+  
+
+  dens_list[[c(1, 2)]] |> list_flatten() |> 
+  wrap_plots(ncol = 2)
 
 p <- all_plt + ess_plt
 ggsave(paste0(results_dir, "/fpplot.png"), plot = p)
@@ -87,7 +206,7 @@ ggsave(paste0(results_dir, "/fpplot.png"), plot = p)
 
 
 
-
+spec_plots |> list
 
 
 

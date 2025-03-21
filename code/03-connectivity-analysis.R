@@ -16,23 +16,23 @@ city_boundaries <- st_read("data/city_boundaries.gpkg")
 target_species <- c("Callipepla_californica", "Lynx_rufus", "Pituophis_catenifer")
 city_spec <- tibble(species = target_species, city = c("San Francisco", "Oakland_Piedmont", "San Jose"))
 
-results_dir_parent <- paste0(
-  "./results/connectivity/",
-  format(Sys.time(), "%Y-%m-%d"),
-  "_lcp_addspec"
-)
-dir.create(
-  results_dir_parent,
-  recursive = T
-)
-# results_dir_parent <- sprintf("results/connectivity/2025-02-19_newspec-sf/%s", spec)
+# results_dir_parent <- paste0(
+#   "./results/connectivity/",
+#   format(Sys.time(), "%Y-%m-%d"),
+#   "_lcp-new-greenspace"
+# )
+# dir.create(
+#   results_dir_parent,
+#   recursive = T
+# )
+results_dir_parent <- "results/connectivity/2025-03-18_lcp-new-greenspace"
 
 
 
 # Important functions ---------------------------------------
 writeResults <- function(results, type, results_dir) {
-  results$lcp_density |> writeRaster(sprintf("%s/path_density_%s.tif", results_dir, type))
-  results$lcp_paths |> write_sf(sprintf("%s/paths_%s.gpkg", results_dir, type))
+  results$lcp_density |> writeRaster(sprintf("%s/path_density_%s.tif", results_dir, type), overwrite = T)
+  results$lcp_paths |> write_sf(sprintf("%s/paths_%s.gpkg", results_dir, type), overwrite = T)
 }
 
 # Function for calculating leastcostpath
@@ -75,11 +75,12 @@ costFunction <- function(HSI, threshold = maxtss_thresh) {
 }
 
 # Run it ---------------------------------------
+target_species <- "Pituophis_catenifer"
 map(target_species, function(spec) {
   # browser()
   print(sprintf("Working on %s...", spec))
   # Load the habitat suitability raster using terra
-  sdm_results_path <- paste0("results/sdm/run-2025-01-21_new-species/", spec)
+  sdm_results_path <- paste0("./results/sdm/run-2025-03-18_new-greenspace-preds/", spec)
   habitat_suitability <- rast(paste0(sdm_results_path, "/prediction.tif"))
 
   # New results
@@ -189,6 +190,38 @@ map(target_species, function(spec) {
     st_as_sf() |>
     st_centroid()
 
+  # gopher snake has 268 sites so need to make it smaller
+  if (nrow(suitable_cents) > 20) {
+    # browser()
+
+    # Compute pairwise distances
+    dist_matrix <- as.matrix(st_distance(suitable_cents))
+
+    # Greedy selection to maximize spacing
+    select_evenly_spaced <- function(dist_matrix, num_select) {
+      selected_idx <- integer(num_select)
+      selected_idx[1] <- sample(1:nrow(dist_matrix), 1) # Start with a random point
+
+      2:num_select |> reduce(function(selected, i) {
+        remaining_idx <- setdiff(1:nrow(dist_matrix), selected)
+        min_distances <- remaining_idx |>
+          map_dbl(~ min(dist_matrix[.x, selected]))
+        c(selected, remaining_idx[which.max(min_distances)])
+      }, .init = selected_idx[1])
+    }
+
+    selected_indices <- select_evenly_spaced(dist_matrix, 20)
+    selected_points <- suitable_cents[selected_indices, ]
+
+
+    # ggplot() +
+    #   geom_sf(data = suitable_cents, color = "gray", alpha = 0.5) +
+    #   geom_sf(data = selected_points, color = "blue", size = 3) +
+    #   theme_minimal()
+    suitable_cents <- selected_points
+  }
+  print(sprintf("Suitable habitat centroids = %s", nrow(suitable_cents)))
+  suitable_cents |> write_sf(paste0(results_dir, "/suitable_centroids.gpkg"))
 
   allgrn_conductance <- rast(paste0(results_dir, "/conductance_allgrn.tif"))
   essential_conductance <- rast(paste0(results_dir, "/conductance_essential.tif"))
