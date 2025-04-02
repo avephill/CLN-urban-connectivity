@@ -6,14 +6,18 @@ library(sf)
 library(units)
 
 
+
 results_path <- "results/connectivity/2025-03-18_lcp-new-greenspace"
 
 
 target_species <- c("Callipepla_californica", "Lynx_rufus", "Pituophis_catenifer")
 
 
-boxplots_n_means <- map(target_species, function(spec) {
+violins_n_means <- map(target_species, function(spec) {
   result_path <- sprintf("%s/%s", results_path, spec)
+
+  essential_color <- "#296218"
+  all_color <- "#A8C8D1"
 
   # City boundaries
   city_boundaries_prep <- st_read("data/city_boundaries.gpkg")
@@ -21,22 +25,27 @@ boxplots_n_means <- map(target_species, function(spec) {
   lcp_allgreen <- st_read(sprintf("%s/paths_allgreen.gpkg", result_path))
   lcp_esssential <- st_read(sprintf("%s/paths_essential.gpkg", result_path))
 
-  lcp_dens_allgreen <- rast(sprintf("%s/path_density_allgreen.tif", result_path))
-  lcp_dens_essential <- rast(sprintf("%s/path_density_essential.tif", result_path))
-
   agg_lcp <- bind_rows(
     lcp_allgreen |> mutate(greenspace = "all"),
     lcp_esssential |> mutate(greenspace = "essential")
   ) |>
     mutate(path_length = st_length(geom)) |>
-    filter(path_length > (0 |> set_units("m")))
+    filter(path_length > (0 |> set_units("m"))) |> 
+    mutate(path_length = path_length |> as.vector())
+  
+  # Calculate p-values
+  cost_test <- wilcox.test(cost ~ greenspace, data = agg_lcp)
+  length_test <- wilcox.test(path_length ~ greenspace, data = agg_lcp)
+
+  pval_text <- function(p) {
+    if (p < 0.001) return("p < 0.001")
+    return(sprintf("p = %.3f", p))
+  }
 
   bb_pathcost.plt <- agg_lcp |> ggplot() +
-    geom_boxplot(aes(x = greenspace, y = cost), 
-                 fill = "lightgray",
-                 alpha = 0.7,
-                 outlier.color = "steelblue",
-                 outlier.alpha = 0.5) +
+    geom_violin(aes(x = greenspace, y = cost, fill = greenspace)) +
+    scale_fill_manual(values = c("all" = all_color, "essential" = essential_color)) +
+    guides(fill = "none") +
     stat_summary(aes(x = greenspace, y = cost),
       fun = mean,
       geom = "point",
@@ -50,10 +59,16 @@ boxplots_n_means <- map(target_species, function(spec) {
       width = 0.2,
       color = "red"
     ) +
+    annotate("text", 
+             x = 1.5, 
+             y = max(agg_lcp$cost, na.rm = TRUE) * 0.9,
+             label = pval_text(cost_test$p.value),
+             vjust = -0.5,
+             size = 3) +
     scale_x_discrete(labels = c("all" = "All Greenspaces", "essential" = "Essential Only")) +
     labs(x = "Greenspace Type",
          y = "Path Cost",
-         title = "Path Cost Distribution") +
+         title = "Path Cost") +
     theme_minimal() +
     theme(
       plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
@@ -64,11 +79,9 @@ boxplots_n_means <- map(target_species, function(spec) {
     )
 
   bb_pathlength.plt <- agg_lcp |> ggplot() +
-    geom_boxplot(aes(x = greenspace, y = path_length),
-                 fill = "lightgray",
-                 alpha = 0.7,
-                 outlier.color = "steelblue",
-                 outlier.alpha = 0.5) +
+    geom_violin(aes(x = greenspace, y = path_length, fill = greenspace)) +
+    scale_fill_manual(values = c("all" = all_color, "essential" = essential_color)) +
+    guides(fill = "none") +
     stat_summary(aes(x = greenspace, y = path_length),
       fun = mean,
       geom = "point",
@@ -82,10 +95,16 @@ boxplots_n_means <- map(target_species, function(spec) {
       width = 0.2,
       color = "red"
     ) +
+    annotate("text", 
+             x = 1.5, 
+             y = max(agg_lcp$path_length, na.rm = TRUE) * 0.9,
+             label = pval_text(length_test$p.value),
+             vjust = -0.5,
+             size = 3) +
     scale_x_discrete(labels = c("all" = "All Greenspaces", "essential" = "Essential Only")) +
     labs(x = "Greenspace Type",
          y = "Path Length (m)",
-         title = "Path Length Distribution") +
+         title = "Path Length") +
     theme_minimal() +
     theme(
       plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
@@ -95,30 +114,158 @@ boxplots_n_means <- map(target_species, function(spec) {
       panel.grid.major.x = element_blank()
     )
 
-  # max_dens_val <- max(c(
-  #   values(lcp_dens_allgreen),
-  #   values(lcp_dens_essential)
-  # ), na.rm = T)
+  # Get path density from rasters
+  lcp_dens_allgreen <- rast(sprintf("%s/path_density_allgreen.tif", result_path))
+  lcp_dens_essential <- rast(sprintf("%s/path_density_essential.tif", result_path))
 
-# LCP Density
-#   lcp_dens_allgreen
-# lcp_dens_essential
+  agg_density <- bind_rows(
+    lcp_dens_allgreen |> as_tibble() |> mutate(greenspace = "all"),
+    lcp_dens_essential |> as_tibble() |> mutate(greenspace = "essential")
+  ) |>
+    rename(path_density = crosses) |>
+    filter(!is.na(path_density), path_density > 0)
+
+    density_test <- wilcox.test(path_density ~ greenspace, data = agg_density)
+
+  bb_pathdensity.plt <- agg_density |> ggplot() +
+    geom_violin(aes(x = greenspace, y = path_density, fill = greenspace)) +
+    scale_fill_manual(values = c("all" = all_color, "essential" = essential_color)) +
+    guides(fill = "none") +
+    stat_summary(aes(x = greenspace, y = path_density),
+      fun = mean,
+      geom = "point",
+      color = "red",
+      size = 3,
+      shape = 18
+    ) +
+    stat_summary(aes(x = greenspace, y = path_density),
+      fun.data = mean_cl_normal,
+      geom = "errorbar",
+      width = 0.2,
+      color = "red"
+    ) +
+    annotate("text",
+      x = 1.5,
+      y = max(agg_density$path_density, na.rm = TRUE) * 0.9,
+      label = pval_text(density_test$p.value),
+      vjust = -0.5,
+      size = 3
+    ) +
+    scale_x_discrete(labels = c("all" = "All Greenspaces", "essential" = "Essential Only")) +
+    labs(
+      x = "Greenspace Type",
+      y = "Path Density",
+      title = "Path Density"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 12, face = "bold"),
+      axis.title = element_text(size = 10),
+      axis.text = element_text(size = 9),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank()
+    )
   
+  # Calculate summary statistics
+  cost_stats <- agg_lcp |>
+    group_by(greenspace) |>
+    summarise(
+      mean_cost = mean(cost, na.rm = TRUE),
+      median_cost = median(cost, na.rm = TRUE),
+      n_cost = n()
+    )
 
-  return(list(
+  length_stats <- agg_lcp |>
+    group_by(greenspace) |>
+    summarise(
+      mean_length = mean(path_length, na.rm = TRUE),
+      median_length = median(path_length, na.rm = TRUE),
+      n_length = n()
+    )
+
+  density_stats <- agg_density |>
+    group_by(greenspace) |>
+    summarise(
+      mean_density = mean(path_density, na.rm = TRUE),
+      median_density = median(path_density, na.rm = TRUE),
+      n_density = n()
+    )
+
+  # Create stats tibble with proper row alignment
+  stats_tibble <- tibble(
+    species = spec,
+    metric = c("cost", "path_length", "path_density"),
+    p_value = c(
+      cost_test$p.value,
+      length_test$p.value,
+      density_test$p.value
+    ),
+    test_statistic = c(
+      cost_test$statistic,
+      length_test$statistic,
+      density_test$statistic
+    )
+  )
+
+  # Add means
+  stats_tibble$mean_all <- c(
+    cost_stats$mean_cost[cost_stats$greenspace == "all"],
+    length_stats$mean_length[length_stats$greenspace == "all"],
+    density_stats$mean_density[density_stats$greenspace == "all"]
+  )
+  stats_tibble$mean_essential <- c(
+    cost_stats$mean_cost[cost_stats$greenspace == "essential"],
+    length_stats$mean_length[length_stats$greenspace == "essential"],
+    density_stats$mean_density[density_stats$greenspace == "essential"]
+  )
+
+  # Add medians
+  stats_tibble$median_all <- c(
+    cost_stats$median_cost[cost_stats$greenspace == "all"],
+    length_stats$median_length[length_stats$greenspace == "all"],
+    density_stats$median_density[density_stats$greenspace == "all"]
+  )
+  stats_tibble$median_essential <- c(
+    cost_stats$median_cost[cost_stats$greenspace == "essential"],
+    length_stats$median_length[length_stats$greenspace == "essential"],
+    density_stats$median_density[density_stats$greenspace == "essential"]
+  )
+
+  # Add sample sizes
+  stats_tibble$n_all <- c(
+    cost_stats$n_cost[cost_stats$greenspace == "all"],
+    length_stats$n_length[length_stats$greenspace == "all"],
+    density_stats$n_density[density_stats$greenspace == "all"]
+  )
+  stats_tibble$n_essential <- c(
+    cost_stats$n_cost[cost_stats$greenspace == "essential"],
+    length_stats$n_length[length_stats$greenspace == "essential"],
+    density_stats$n_density[density_stats$greenspace == "essential"]
+  )
+
+  return(list(plots = list(
     bb_pathcost.plt = bb_pathcost.plt,
-    bb_pathlength.plt = bb_pathlength.plt#,
-    # all_map.plt = all_map.plt,
-    # ess_map.plt = ess_map.plt
-  ))
+    bb_pathlength.plt = bb_pathlength.plt,
+    bb_pathdensity.plt = bb_pathdensity.plt
+  ),
+  stats = stats_tibble))
 })
 
-boxplots_n_means |>
+violins_n_means.comp <- violins_n_means |>
+  map("plots") |>
   list_flatten() |>
-  wrap_plots(ncol = 2, widths = c(1, 1)) +
-  plot_annotation(tag_levels = list(target_species |> map(~ c(.x, "")) |> flatten_chr()))
+  wrap_plots(ncol = 3, widths = c(1, 1,1)) +
+  plot_annotation(tag_levels = list(target_species |> map(~ c(.x, "","")) |> flatten_chr())) +
+  theme(plot.tag = element_text(angle = 90, size = 2))
 
+violins_n_means.comp
 
+# save to results_dir
+ggsave(paste0(results_path, "/violins_n_means.pdf"), plot = violins_n_means.comp)
+
+violins_n_means |>
+  map("stats") |>
+  bind_rows() |> write_csv(paste0(results_path, "/violins_n_means_stats.csv"))
 
 
 

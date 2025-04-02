@@ -25,7 +25,9 @@ sdm_train_mask.sf <- terrestrial.sf
 #                       format(Sys.time(), "%Y-%m-%d"),
 #                       "_newvars/")
 
-results.dir <- "results/sdm/run-2025-01-21_new-species/"
+city_boundaries <- st_read("data/city_boundaries.gpkg")
+
+results.dir <- "results/sdm/run-2025-03-29_city-limits/"
 
 dir.create(results.dir, recursive = TRUE)
 
@@ -155,6 +157,10 @@ plot(predictors.sr |> subset("Min_Distance_to_130acre_Greenspace"))
 
 spec.sf <- st_read("./data/occurrence/2025-01-21_target_spec.gpkg")
 
+spec.sf |>
+  slice_max(eventdate) |>
+  pull(eventdate)
+
 spec_intersect.sf <- spec.sf |>
   st_intersection(sdm_train_mask.sf |> st_transform(st_crs(spec.sf)))
 
@@ -241,10 +247,6 @@ write_sf(spec_thinned.sf, paste0(results.dir, "spec_obs_thinned.gpkg"))
 predictors.sr <- rast(paste0(results.dir, "predictors.tif"))
 spec_thinned.sf <- st_read(paste0(results.dir, "spec_obs_thinned.gpkg"))
 
-# ggplot() +
-# geom_sf(data = background_landmask.sf) +
-# geom_sf(data = spec_cleaned.sf)
-
 
 # Simplify input polygons and add some buffer zone to it
 background_landmask.sf <-
@@ -268,23 +270,13 @@ point_dens.df <- expand.grid(x = point.dens$x, y = point.dens$y, KEEP.OUT.ATTRS 
 point_dens.df$z <- point.dens$z |> as.vector()
 point_dens.sr <- rast(point_dens.df) |> mask(background_landmask.sf)
 
+point_dens.sr |> writeRaster(paste0(results.dir, "point_dens.tif"))
+
 
 plot(point_dens.sr)
 plot(background_landmask.sf, add = T)
 
-
-# Sample randomly using point density
-bg.df <- as.data.frame(
-  xyFromCell(
-    point_dens.sr,
-    sample(which(!is.na(values(point_dens.sr))),
-      size = 20000, # 20*nrow(presvals),
-      prob = values(point_dens.sr)[!is.na(values(point_dens.sr))]
-    )
-  )
-)
-
-write.csv(bg.df, paste0(results.dir, "background_points.csv"))
+# We're going to make background points within cities now
 
 # -------------------------------------------------------------------------
 
@@ -292,17 +284,18 @@ write.csv(bg.df, paste0(results.dir, "background_points.csv"))
 
 # -------------------------------------------------------------------------
 
-bg.df <- read.csv(paste0(results.dir, "background_points.csv")) |>
-  dplyr::select(x, y)
 
-
-ggplot() +
-  geom_sf(data = sdm_train_mask.sf) +
-  geom_sf(data = bg.df |> st_as_sf(coords = c(1, 2), crs = 4326))
+# ggplot() +
+#   geom_sf(data = sdm_train_mask.sf) +
+#   geom_sf(data = bg.df |> st_as_sf(coords = c(1, 2), crs = 4326))
 
 spec_thinned.sf <- st_read(paste0(results.dir, "spec_obs_thinned.gpkg"))
+point_dens.sr <- rast(paste0(results.dir, "point_dens.tif"))
 
-species <- spec_thinned.sf$species |> unique()
+species <- spec_thinned.sf$species |>
+  unique() |>
+  str_subset("Taricha", negate = T)
+species <- "Lynx rufus"
 
 
 # for(spec in species){
@@ -323,12 +316,56 @@ trainSDM <- function(spec, input_obs) {
 
     predictor.stack <- rast(paste0(results.dir, "predictors.tif"))
     names(predictor.stack) <- names(predictor.stack) |> str_replace_all(" ", "_")
+    # browser()
+
+    # Crop and mask predictors and input obs to city boundaries
+    # Comment this section out if you don't want to crop to city boundaries
+    city_name <- case_when(
+      spec == "Pituophis catenifer" ~ "San Jose",
+      spec == "Callipepla californica" ~ "San Francisco",
+      spec == "Lynx rufus" ~ "Oakland_Piedmont",
+      TRUE ~ NA # default case
+    )
+
+    city_boundary <- city_boundaries |>
+      filter(jurname == city_name)
+
+    predictor.stack <- predictor.stack |>
+      crop(city_boundary) |>
+      mask(city_boundary)
+
+    input_obs_backup <- input_obs
+
+    # plot(predictor.stack[[1]])
+    input_obs <- input_obs |>
+      st_intersection(city_boundary)
 
     pos_pts.df <- input_obs |>
       filter(species == spec) |>
       st_coordinates()
-    abs_pts.df <- bg.df
 
+    ggplot() +
+      geom_sf(data = city_boundary) +
+      geom_sf(data = input_obs_backup |> filter(species == spec))
+
+    region_pointdens.sr <- point_dens.sr |>
+      crop(city_boundary) |>
+      mask(city_boundary)
+
+    # Sample randomly using point density
+    bg.df <- as.data.frame(
+      xyFromCell(
+        region_pointdens.sr,
+        sample(which(!is.na(values(region_pointdens.sr))),
+          size = 10000, # 20*nrow(presvals),
+          prob = values(region_pointdens.sr)[!is.na(values(region_pointdens.sr))]
+        )
+      )
+    ) |> dplyr::select(x, y)
+    ##
+
+    # write.csv(bg.df, paste0(results.dir, "background_points.csv"))
+    abs_pts.df <- bg.df
 
     # OK we want to only have one presence per predictor cell
     # Since these data are at such a small resolution, we can't resample because
@@ -337,7 +374,6 @@ trainSDM <- function(spec, input_obs) {
     # We want a presence in the predictor size cell if there is just one spec occ within
     # So we're going to convert to 0 (abs), NA (not possible to grow here), and 1 (presence)
     # and then bilinear resample and say every value > 0 is a presence
-
 
     # Use all points unless a smaller N is set
     if (train_N == "all") {
@@ -392,12 +428,15 @@ trainSDM <- function(spec, input_obs) {
     sp_extract.sf <- sp_extract.df |>
       st_as_sf(coords = c("x", "y"), crs = st_crs(block_sp.sf))
 
-    # browser()
+    browser()
 
     # Check spatial autocorrelation to inform block size
-    # cv_spatial_autocor(x = sp_extract.sf,
-    #                    column = "Y")
+    # cv_spatial_autocor(
+    #   x = sp_extract.sf,
+    #   column = "Y"
+    # )
     # cv_block_size(x = sp_extract.sf, column = "Y")
+    # browser()
 
     scv1 <- cv_spatial(
       x = sp_extract.sf,
@@ -406,7 +445,7 @@ trainSDM <- function(spec, input_obs) {
         data.frame() |>
         dplyr::select(-Y, -geometry))],
       k = n_replicates, # number of folds
-      size = 52000, # size of the blocks in metres
+      # size = 5000, # size of the blocks in metres
       selection = "random", # random blocks-to-fold
       iteration = 50, # find evenly dispersed folds
       progress = T, # trun off progress bar
