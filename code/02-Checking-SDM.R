@@ -10,46 +10,31 @@ library(SDMtune)
 study_cities <- st_read("data/city_boundaries.gpkg")
 
 # results.dir <- "results/sdm/run-2025-03-18_new-greenspace-preds/"
-results.dir <- "results/sdm/run-2025-03-29_city-limits/"
-species <- c("Callipepla californica", "Pituophis catenifer")
+results.dir <- "results/sdm/run-2025-04-02_city-limits-specswitch/"
+species <- c("Callipepla californica", "Pituophis catenifer", "Lepus californicus")
 
 
 # species <- c("Callipepla californica", "Lynx rufus", "Pituophis catenifer")
 
 process_sdm_results <- function(spec) {
-  spec_pn <- spec |> str_replace_all(" ", "_")
-
-  # Regional SDM map -----------------------------------------------
+  # browser()
+  spec_pn <- spec |>
+    str_replace_all(" ", "_") |>
+    paste0("/optimized")
   tt_pred.strs <- read_stars(paste0(results.dir, spec_pn, "/prediction.tif"))
 
-  tt_pts.sf <- st_read(paste0(results.dir, "spec_obs_thinned.gpkg")) |>
+  tt_pts.sf <- st_read(paste0(results.dir, "spec_obs.gpkg")) |>
     filter(species == spec)
   # browser()
-  tt_pts.sf |> distinct(species)
+  # tt_pts.sf |> distinct(species)
   # st_read(paste0(results.dir, "spec_obs_thinned.gpkg")) |> select(species)
 
-  tt.g <-
-    ggplot() +
-    geom_stars(
-      data = tt_pred.strs, aes(fill = prediction.tif),
-      na.action = na.omit
-    ) +
-    scale_fill_viridis_c() +
-    geom_sf(data = tt_pts.sf %>% st_geometry(), color = "white") +
-    theme_void() +
-    theme(
-      legend.title = element_blank(),
-      legend.text = element_blank(),
-      legend.key.size = unit(1.5, "cm")
-    )
-
-  ggsave(paste0(results.dir, spec_pn, "/regionmap.pdf"), tt.g)
 
   # Map by city ---------------------------------------
   city_name <- case_when(
-    spec == "Pituophis catenifer" ~ "San Jose",
+    spec == "Pituophis catenifer" ~ "Oakland_Piedmont",
     spec == "Callipepla californica" ~ "San Francisco",
-    spec == "Lynx rufus" ~ "Oakland_Piedmont",
+    spec == "Lepus californicus" ~ "San Jose",
     TRUE ~ NA # default case
   )
   city <- study_cities |> filter(jurname == city_name)
@@ -99,8 +84,8 @@ process_sdm_results <- function(spec) {
   # Accuracy Metrics ---------------------------------------
   # browser()
   sdm_mod <- readRDS(paste0(results.dir, spec_pn, "/sdm_model.rds"))
-  spec_auc <- auc(sdm_mod)
-  spec_tss <- tss(sdm_mod)
+  spec_auc <- SDMtune::auc(sdm_mod, test = T)
+  spec_tss <- SDMtune::tss(sdm_mod, test = T)
   spec_occ <- sdm_mod@data@pa |> sum(na.rm = T)
   # spec_aicc <- ?SDMtune::aicc()
   spec_acc <- tibble(
@@ -114,3 +99,33 @@ process_sdm_results <- function(spec) {
 
 # Process all species
 walk(species, process_sdm_results)
+
+
+
+
+
+
+
+# Checking something
+library(SDMtune)
+library(maxnet)
+cc_mod <- readRDS("results/sdm/run-2025-03-29_city-limits/Callipepla_californica/sdm_model.rds")
+getTunableArgs(cc_mod)
+
+# Define the hyperparameters to test
+h <- list(
+  reg = seq(0.2, 5, 0.2),
+  fc = c("l", "lq", "lh", "lp", "lqp", "lqph")
+)
+opt_mod <- SDMtune::optimizeModel(cc_mod, metric = "auc", hypers = h)
+opt_mod@results
+auc(cc_mod)
+auc(opt_mod@models[[1]])
+?optimizeModel
+?auc
+SDMtune::auc(cc_mod, test = T)
+SDMtune::auc(opt_mod@models[[1]], test = T)
+
+SDMtune::tss(cc_mod, test = T)
+SDMtune::tss(opt_mod@models[[1]], test = T)
+# Squeezed an addition .02 out of the AUC and .06 out of the TSS

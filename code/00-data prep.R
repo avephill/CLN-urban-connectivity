@@ -47,10 +47,10 @@ target.ewkt <-
 
 # Now pull from local GBIF database
 
-con <- dbConnect(duckdb(dbdir = "~/Data/Occurrences/GBIF/gbif.duckdb"))
+con <- dbConnect(duckdb(dbdir = "~/Data/Occurrences/GBIF/gbif.duckdb", read_only = T))
 con |> dbExecute("install spatial; load spatial")
 
-species_names <- c("Taricha torosa", "Callipepla californica", "Lynx rufus", "Pituophis catenifer")
+species_names <- c("Taricha torosa", "Callipepla californica", "Lynx rufus", "Pituophis catenifer", "Lepus californicus", "Microtus californicus")
 
 target_spec.df <- con |>
   tbl("gbif") |>
@@ -69,9 +69,13 @@ target_spec.sf <- target_spec.df |>
   )
 
 target_spec.sf |>
-  sample_n(10000) |>
+  filter(species %in% c("Microtus californicus", "Lepus californicus")) |>
+  # sample_n(10000) |>
   ggplot() +
   geom_sf(aes(color = species))
+
+
+
 # con <- dbConnect(RPostgreSQL::PostgreSQL(),
 #   host = "flor",
 #   port = 5432,
@@ -100,6 +104,26 @@ write_sf(target_spec.sf,
   ),
   layer = "spec_occ"
 )
+
+
+# testing
+target_spec.sf <- st_read("data/occurrence/2025-04-02_target_spec.gpkg")
+cities <- st_read("data/city_boundaries.gpkg")
+
+city_name <- "San Jose"
+speci <- "Lepus californicus"
+city_check <- target_spec.sf |>
+  filter(species %in% c(speci)) |>
+  st_intersection(cities |> filter(jurname == city_name))
+
+
+city_check |>
+  ggplot() +
+  geom_sf(data = cities |> filter(jurname == city_name)) +
+  geom_sf(data = target_spec.sf |>
+    filter(species %in% c(speci)) |>
+    st_intersection(cities |> filter(jurname == city_name)), aes(color = species))
+city_check |> count(species)
 
 #  ---------------------------------------
 # City Boundaries ---------------------------------------

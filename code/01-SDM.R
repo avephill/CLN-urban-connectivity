@@ -27,7 +27,7 @@ sdm_train_mask.sf <- terrestrial.sf
 
 city_boundaries <- st_read("data/city_boundaries.gpkg")
 
-results.dir <- "results/sdm/run-2025-03-29_city-limits/"
+results.dir <- "results/sdm/run-2025-04-02_city-limits-specswitch/"
 
 dir.create(results.dir, recursive = TRUE)
 
@@ -53,7 +53,7 @@ bioclim_uncorr.stack <- subset(bioclim.stack, vif_excluded, negate = T)
 
 list.files("data/predictors")
 predictor_names <- c(
-  "altitude", "slope", "solarradiation",
+  "altitude", "slope", # "solarradiation",
   "vegetation",
   # "nlcd_landcover",
   "nlcd_reclass_landcover",
@@ -125,27 +125,21 @@ set.cats(predictors.sr,
   value = cat_table
 )
 
+# # Take a look at collinearity of all predictors
+# # Compute the correlation matrix (using cell values)
+# cor_matrix <- cor(values(predictors.sr), use = "pairwise.complete.obs")
+
+# # View the correlation matrix
+# print(cor_matrix)
+# # Computing correlation matrix with p-values
+# corrp.mat <- cor_pmat(cor_matrix)
+# ggcorrplot::ggcorrplot(cor_matrix)
 
 # Write the godforsaken thing
 writeRaster(predictors.sr, paste0(results.dir, "predictors.tif"),
   overwrite = T, progress = T
 )
 
-plot(predictors.sr |> subset("Min_Distance_to_130acre_Greenspace"))
-
-# # Look at some correlation
-# library(corrr)
-
-# predictor.tb <- predictors.sr |>
-#   as.data.frame() |>
-#   tibble() |>
-#   select_if(is.numeric) |>
-#   drop_na()
-
-# pred_cor <- predictor.tb |> correlate(method = "pearson")
-# View(pred_cor)
-
-# pred_cor |> write.csv(paste0(results.dir, "predictor_coll.csv"))
 
 
 # -------------------------------------------------------------------------
@@ -155,7 +149,7 @@ plot(predictors.sr |> subset("Min_Distance_to_130acre_Greenspace"))
 # -------------------------------------------------------------------------
 
 
-spec.sf <- st_read("./data/occurrence/2025-01-21_target_spec.gpkg")
+spec.sf <- st_read("./data/occurrence/2025-04-02_target_spec.gpkg")
 
 spec.sf |>
   slice_max(eventdate) |>
@@ -214,24 +208,7 @@ spec_cleaned.sf <-
 # Percent of records removed
 100 * (nrow(spec_intersect.sf) - nrow(spec_cleaned.sf)) / nrow(spec_intersect.sf)
 
-
 write_sf(spec_cleaned.sf, paste0(results.dir, "spec_obs.gpkg"))
-
-# spec_cleaned.sf <- st_read(paste0(results.dir, "spec_obs.gpkg"))
-
-# Filter to keep only one unique point per raster cell
-spec_thinned.sf <- spec_cleaned.sf |>
-  # Extract cell numbers for each point
-  mutate(cell = cellFromXY(predictors.sr, st_coordinates(spec_cleaned.sf))) |>
-  group_by(cell) |>
-  # slice(1) |>
-  sample_n(1) |>
-  ungroup() |>
-  st_as_sf()
-
-nrow(spec_cleaned.sf) - nrow(spec_thinned.sf)
-
-write_sf(spec_thinned.sf, paste0(results.dir, "spec_obs_thinned.gpkg"))
 
 
 # -------------------------------------------------------------------------
@@ -245,7 +222,19 @@ write_sf(spec_thinned.sf, paste0(results.dir, "spec_obs_thinned.gpkg"))
 
 # Read in predictors and obs from previous sections
 predictors.sr <- rast(paste0(results.dir, "predictors.tif"))
-spec_thinned.sf <- st_read(paste0(results.dir, "spec_obs_thinned.gpkg"))
+spec_cleaned.sf <- st_read(paste0(results.dir, "spec_obs.gpkg"))
+
+# THis is thinned for all occurrences, but need to thin later for each species
+spec_thinned.sf <- spec_cleaned.sf |>
+  # Extract cell numbers for each point
+  mutate(cell = cellFromXY(predictors.sr, st_coordinates(spec_cleaned.sf))) |>
+  group_by(cell) |>
+  # slice(1) |>
+  sample_n(1) |>
+  ungroup() |>
+  st_as_sf()
+
+# write_sf(spec_thinned.sf, paste0(results.dir, "spec_obs_thinned.gpkg"))
 
 
 # Simplify input polygons and add some buffer zone to it
@@ -289,18 +278,19 @@ plot(background_landmask.sf, add = T)
 #   geom_sf(data = sdm_train_mask.sf) +
 #   geom_sf(data = bg.df |> st_as_sf(coords = c(1, 2), crs = 4326))
 
-spec_thinned.sf <- st_read(paste0(results.dir, "spec_obs_thinned.gpkg"))
+spec_cleaned.sf <- st_read(paste0(results.dir, "spec_obs.gpkg"))
 point_dens.sr <- rast(paste0(results.dir, "point_dens.tif"))
 
-species <- spec_thinned.sf$species |>
-  unique() |>
-  str_subset("Taricha", negate = T)
-species <- "Lynx rufus"
+# species <- spec_cleaned.sf$species |>
+#   unique() |>
+#   str_subset("Taricha|Lynx|Microtus", negate = T)
+
+species <- c("Pituophis catenifer", "Callipepla californica", "Lepus californicus")
+# species <- "Lepus californicus"
 
 
 # for(spec in species){
 trainSDM <- function(spec, input_obs) {
-  # browser()
   print(spec)
   spec_dir <- paste0(results.dir, spec |> str_replace(" ", "_"), "/")
 
@@ -321,9 +311,11 @@ trainSDM <- function(spec, input_obs) {
     # Crop and mask predictors and input obs to city boundaries
     # Comment this section out if you don't want to crop to city boundaries
     city_name <- case_when(
-      spec == "Pituophis catenifer" ~ "San Jose",
+      spec == "Pituophis catenifer" ~ "Oakland_Piedmont",
       spec == "Callipepla californica" ~ "San Francisco",
       spec == "Lynx rufus" ~ "Oakland_Piedmont",
+      spec == "Microtus californicus" ~ "Oakland_Piedmont",
+      spec == "Lepus californicus" ~ "San Jose",
       TRUE ~ NA # default case
     )
 
@@ -334,19 +326,30 @@ trainSDM <- function(spec, input_obs) {
       crop(city_boundary) |>
       mask(city_boundary)
 
-    input_obs_backup <- input_obs
+    # input_obs_backup <- input_obs
+    input_obs_spec <- input_obs |> filter(species == spec)
+
+    input_obs_spec_thinned <- input_obs_spec |>
+      # Extract cell numbers for each point
+      mutate(cell = cellFromXY(predictor.stack, st_coordinates(input_obs_spec))) |>
+      group_by(cell) |>
+      sample_n(1) |>
+      ungroup() |>
+      st_as_sf()
+
+    sprintf("Thinned %s points", nrow(input_obs_spec) - nrow(input_obs_spec_thinned))
 
     # plot(predictor.stack[[1]])
-    input_obs <- input_obs |>
+    input_obs_spec_thinned <- input_obs_spec_thinned |>
       st_intersection(city_boundary)
 
-    pos_pts.df <- input_obs |>
+    pos_pts.df <- input_obs_spec_thinned |>
       filter(species == spec) |>
       st_coordinates()
 
     ggplot() +
       geom_sf(data = city_boundary) +
-      geom_sf(data = input_obs_backup |> filter(species == spec))
+      geom_sf(data = input_obs_spec_thinned |> filter(species == spec))
 
     region_pointdens.sr <- point_dens.sr |>
       crop(city_boundary) |>
@@ -428,7 +431,7 @@ trainSDM <- function(spec, input_obs) {
     sp_extract.sf <- sp_extract.df |>
       st_as_sf(coords = c("x", "y"), crs = st_crs(block_sp.sf))
 
-    browser()
+    # browser()
 
     # Check spatial autocorrelation to inform block size
     # cv_spatial_autocor(
@@ -500,16 +503,102 @@ trainSDM <- function(spec, input_obs) {
   }
 }
 
-for (spec in species) {
-  trainSDM(spec, input_obs = spec_thinned.sf)
-}
+# for (spec in species) {
+#   trainSDM(spec, input_obs = spec_cleaned.sf)
+# }
 
 
 # For parallel training of multiple species if needed
-# safeSDM <- safely(.f = trainSDM)
+safeSDM <- safely(.f = trainSDM)
 
-# plan(multisession, workers = 3)
+# plan(sequential)
+plan(multicore, workers = 3)
 
-# system.time({
-#   print(future_map(species, safeSDM))
-# })
+system.time({
+  future_map(species, ~ safeSDM(., input_obs = spec_cleaned.sf), seed = T)
+})
+
+
+
+
+# Optimize models ---------------------------------------
+# Optionally, you can optimize the models using a GA that finds optimal hyperparameters
+
+optimizeModels <- function(spec) {
+  # browser()
+  spec_dir <- paste0(results.dir, spec |> str_replace(" ", "_"), "/")
+  sdm_mod <- readRDS(paste0(spec_dir, "sdm_model.rds"))
+
+  dir.create(paste0(spec_dir, "optimized/"), showWarnings = F)
+
+  # Define the hyperparameters to test
+  h <- list(
+    reg = seq(0.2, 5, 0.2),
+    fc = c("l", "lq", "lh", "lp", "lqp", "lqph")
+  )
+
+  # h <- list(
+  #   reg = c(.2, .4),
+  #   fc = c("l", "lq")
+  # )
+  library(maxnet)
+  opt_mods <- SDMtune::optimizeModel(sdm_mod, metric = "auc", hypers = h)
+  opt_mods@results |>
+    write_csv(paste0(spec_dir, "optimized/optimization_results.csv"))
+
+  opt_mod <- opt_mods@models[[1]]
+
+  # Make prediction
+  predictor.stack <- rast(paste0(results.dir, "predictors.tif"))
+  names(predictor.stack) <- names(predictor.stack) |> str_replace_all(" ", "_")
+
+  # Crop and mask predictors and input obs to city boundaries
+  # Comment this section out if you don't want to crop to city boundaries
+  city_name <- case_when(
+    spec == "Pituophis catenifer" ~ "Oakland_Piedmont",
+    spec == "Callipepla californica" ~ "San Francisco",
+    spec == "Lynx rufus" ~ "Oakland_Piedmont",
+    spec == "Microtus californicus" ~ "Oakland_Piedmont",
+    spec == "Lepus californicus" ~ "San Jose",
+    TRUE ~ NA # default case
+  )
+
+  city_boundary <- city_boundaries |>
+    filter(jurname == city_name)
+
+  predictor.stack <- predictor.stack |>
+    crop(city_boundary) |>
+    mask(city_boundary)
+
+  # Make prediction
+
+  sdm_prediction <-
+    predict(opt_mod,
+      data = predictor.stack,
+      type = "cloglog",
+      cores = 5
+    )
+  vi_maxnet <- varImp(opt_mod,
+    permut = 5
+  )
+
+  # Save the optimized model
+  saveRDS(opt_mod, paste0(spec_dir, "optimized/sdm_model.rds"))
+  writeRaster(sdm_prediction, paste0(spec_dir, "optimized/prediction.tif"))
+  write.csv(vi_maxnet, paste0(spec_dir, "optimized/var_imp.csv"))
+}
+
+species <- c("Callipepla californica", "Lepus californicus")
+for (spec in species) {
+  optimizeModels(spec)
+}
+
+# For parallel training of multiple species if needed
+safeOptimize <- safely(.f = optimizeModels)
+
+# plan(sequential)
+plan(multicore, workers = 3)
+
+system.time({
+  future_map(species, safeOptimize, seed = T)
+})
