@@ -317,9 +317,13 @@ city_greenspace <- og_grn |>
   st_transform(4326) |>
   rename(geom = geometry) |>
   st_make_valid() |>
+  group_by(GreenSpace, Final_CLN2) |>
+  summarize(geom = st_union(geom), original_piece_count = n()) |>
   mutate(
+    area_m2 = st_area(geom),
     area_acres = st_area(geom) |> set_units("acre")
   )
+
 city_greenspace |> write_sf("data/greenspaces/city_greenspace.gpkg")
 
 
