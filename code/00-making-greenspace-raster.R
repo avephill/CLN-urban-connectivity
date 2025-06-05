@@ -5,6 +5,10 @@
 #' this purpose. From about 10 minutes to a few hours.
 #' Much faster than the days the other methods took
 
+#  ---------------------------------------
+# Make regional greenspaces for training SDM from NLCD ---------------------------------------
+# ---------------------------------------
+
 # Prep greenspace sizes ---------------------------------------
 # 1,5,10,15 acre size
 library(terra)
@@ -267,8 +271,9 @@ names(greenspace_dist2) <- "greenspace_dist2"
 plot(greenspace_dist2)
 greenspace_dist2 |> writeRaster("data/predictors/2acre_greenspace_distance.tif", overwrite = T)
 
+
 #  ---------------------------------------
-# Make greenspaces for prediction from Christine's data ---------------------------------------
+# Make city greenspaces for prediction from Christine's data ---------------------------------------
 # ---------------------------------------
 
 # Make essential-only greenspace ---------------------------------------
@@ -303,6 +308,7 @@ tcon |> dbExecute("SELECT *
 FROM template_grid_geo, baycities
 WHERE ST_Intersects(template_grid_geo.geom, ST_GeomFromText(baycities.geom_wkt))")
 toc()
+
 
 
 # Create a table of essential greenspaces by:
@@ -386,8 +392,8 @@ makeEssentialDistance <- function(min_greenspace_size) {
 c(130, 75, 30, 10, 2) |> map(makeEssentialDistance)
 
 # Checking
-rast("data/predictors/130acre_essential_greenspace_distance.tif") |> plot()
-rast("data/predictors/2acre_essential_greenspace_distance.tif") |> plot()
+rast("data/predictors/130acre_essential_greenspace_distance.tif") |> plot(main = "130 acre essential greenspace distance")
+rast("data/predictors/2acre_essential_greenspace_distance.tif") |> plot(main = "2 acre essential greenspace distance")
 
 
 # City-only all greenspace ---------------------------------------
@@ -458,3 +464,81 @@ rast(c(
   "data/predictors/2acre_city_all_greenspace_dist.tif"
 )) |> plot()
 # Looks good
+
+# City-only non-essential greenspace ---------------------------------------
+#' Calculate distances to non-essential greenspaces in the city
+#' This follows the same pattern as essential and all greenspaces but filters for non-essential ones
+slope.sr <- rast("data/predictors/slope.tif")
+empty.sr <- rast(slope.sr[[1]])
+# Set memory limit for non-essential greenspace calculations
+tcon |> dbExecute("
+SET memory_limit = '200GB';
+SET preserve_insertion_order = true;
+SET threads TO 20;
+")
+
+
+tcon |> dbExecute("
+CREATE OR REPLACE TABLE city_nonessential_greenspace
+AS
+SELECT * EXCLUDE geom,
+  grn.geom,
+  ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true) AS geom3310,
+  ST_TRANSFORM(ST_Centroid(grn.geom), 'EPSG:4326', 'EPSG:3310', always_xy := true) AS centroid_geom3310,
+  ST_Centroid(grn.geom) AS centroid_geom,
+  ST_SimplifyPreserveTopology(ST_MakeValid(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true)), 5000) AS simple_geom3310,
+  ST_Area(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true)) / 4046.86 AS recalc_acres
+FROM ST_READ('data/greenspaces/city_greenspace.gpkg') AS grn
+WHERE Final_CLN2 != 'Essential';
+
+CREATE INDEX idx_grn_noness_geom ON city_nonessential_greenspace USING RTREE (geom);
+CREATE INDEX idx_grn_noness_centroid_geom ON city_nonessential_greenspace USING RTREE (centroid_geom);
+CREATE INDEX idx_grn_noness_simple_geom ON city_nonessential_greenspace USING RTREE (simple_geom3310);
+CREATE INDEX idx_grn_noness_cent3310_geom ON city_nonessential_greenspace USING RTREE (centroid_geom3310);
+")
+
+nncitynoness_query <- glue("
+WITH green AS
+(SELECT * FROM city_nonessential_greenspace
+WHERE area_acres >= %s)
+
+SELECT
+    template.id AS template_id,
+    template.geom AS template_geom,
+    ST_AsText(template.centroid_geom) AS geom_wkt,
+    MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
+FROM
+    template_grid_cities AS template, green
+GROUP BY
+    template.id, template.geom, template.centroid_geom;
+")
+
+makeNonEssentialCityDistance <- function(min_greenspace_size) {
+  tic()
+  tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE city_nonessential_greenspace_dist_%s AS", nncitynoness_query), min_greenspace_size, min_greenspace_size)))
+  toc()
+
+  sf_dist <- tcon |>
+    tbl(paste0("city_nonessential_greenspace_dist_", min_greenspace_size)) |>
+    collect() |>
+    st_as_sf(wkt = "geom_wkt")
+
+  greenspace_dist <- sf_dist |>
+    rasterize(empty.sr, field = "distance_to_greenspace_meters")
+
+  names(greenspace_dist) <- paste0("city_nonessential_greenspace_dist", min_greenspace_size)
+
+  greenspace_dist |>
+    writeRaster(sprintf(
+      "data/predictors/%sacre_city_nonessential_greenspace_dist.tif",
+      min_greenspace_size
+    ), overwrite = T)
+}
+
+c(130, 75, 30, 10, 2) |> map(makeNonEssentialCityDistance)
+
+# Check the results
+rast(c(
+  "data/predictors/130acre_city_nonessential_greenspace_dist.tif",
+  "data/predictors/2acre_city_nonessential_greenspace_dist.tif"
+)) |> plot()
