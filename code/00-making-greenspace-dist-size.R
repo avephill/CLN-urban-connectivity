@@ -4,13 +4,16 @@
 #' duckdb seems to be much faster and more intuitive than postgis or terra for
 #' this purpose. From about 10 minutes to a few hours.
 #' Much faster than the days the other methods took
+#'
+# Produces outputs:
+# - data/predictors/greenspace_nearest_dist.tif
+# - data/predictors/greenspace_nearest_size.tif
 
 #  ---------------------------------------
 # Make regional greenspaces for training SDM from NLCD ---------------------------------------
 # ---------------------------------------
 
 # Prep greenspace sizes ---------------------------------------
-# 1,5,10,15 acre size
 library(terra)
 library(tidyterra)
 library(sf)
@@ -180,7 +183,7 @@ PRAGMA enable_progress_bar;
 ")
 
 nn_query <- glue("
-CREATE OR REPLACE TABLE grn_distance_test AS
+CREATE OR REPLACE TABLE grn_distance_complete_nlcd AS
 WITH green AS (SELECT * FROM greenspace_geo WHERE AREA_acres >= 1),
      distances AS (
        SELECT
@@ -201,22 +204,18 @@ FROM distances
 GROUP BY cell_id, template_geom, geom_wkt;
 ")
 
+
 tcon |> dbGetQuery(paste("EXPLAIN", nn_query))
 
 tic()
 tcon |> dbExecute(nn_query)
 toc()
 
-# tcon |>
-#   tbl("grn_distance_complete") |>
-#   head(10) |>
-#   collect() |>
-#   View()
 slope.sr <- rast("data/predictors/slope.tif")
 empty.sr <- rast(slope.sr[[1]])
 
 sf_dist_complete <- tcon |>
-  tbl("grn_distance_test") |>
+  tbl("grn_distance_complete_nlcd") |>
   select(cell_id, distance_to_greenspace_meters, nearest_greenspace_acres) |>
   collect()
 
@@ -227,166 +226,32 @@ aligned_results <- tibble(cells = empty.sr |> cells()) |>
   # select(cells, distance_to_greenspace_meters)
   select(cells, distance_to_greenspace_meters, nearest_greenspace_acres)
 
-
 # Convert directly to raster values in the right order
 greenspace_nearest_dist <- empty.sr
 values(greenspace_nearest_dist) <- aligned_results$distance_to_greenspace_meters
+names(greenspace_nearest_dist) <- "greenspace_nearest_dist"
 
 ggplot() +
   tidyterra::geom_spatraster(data = greenspace_nearest_dist)
 
-ggsave("results/test18.pdf")
+greenspace_nearest_dist |> writeRaster("data/predictors/greenspace_nearest_dist.tif", overwrite = T)
+
+# ggsave("results/test18.pdf")
 
 greenspace_nearest_size <- empty.sr
 values(greenspace_nearest_size) <- aligned_results$nearest_greenspace_acres
+names(greenspace_nearest_size) <- "greenspace_nearest_size"
+
+greenspace_nearest_size |> writeRaster("data/predictors/greenspace_nearest_size.tif", overwrite = T)
 
 ggplot() +
   tidyterra::geom_spatraster(data = greenspace_nearest_size)
 
-ggsave("results/test2.pdf", y)
-
-# plot(greenspace_dist130)
-greenspace_dist130 |> writeRaster("data/predictors/130acre_greenspace_distance.tif", overwrite = T)
+# ggsave("results/test2.pdf", y)
 
 
 
 
-
-
-
-
-
-
-## Nearest neighbor join ---------------------------------------
-
-nn_query <- glue("
-WITH green AS
-(SELECT * FROM greenspace_geo
-WHERE AREA_acres >= %s)
-
-SELECT
-    template.id AS template_id,
-    template.geom AS template_geom,
-    ST_AsText(template.centroid_geom) AS geom_wkt,
-    MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters,
-    arg_min(green.AREA_acres, ST_Distance(template.centroid_geom3310, green.geom3310)) AS nearest_greenspace_acres
-FROM
-    template_grid_geo AS template, green
-GROUP BY
-    template.id, template.geom, template.centroid_geom;
-")
-
-# tcon |> dbGetQuery(paste("EXPLAIN", nn_query))
-tcon |> dbGetQuery(sprintf(paste("EXPLAIN", nn_query), "130"))
-
-# Set run parameters
-tcon |> dbExecute("
-SET memory_limit = '300GB';
-SET preserve_insertion_order = true;
-SET threads TO 20;
-")
-
-
-# 130
-tic()
-tcon |> dbExecute(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "130", "130"))
-toc()
-# 790 seconds
-
-slope.sr <- rast("data/predictors/slope.tif")
-empty.sr <- rast(slope.sr[[1]])
-tcon |> dbListTables()
-sf_dist130 <- tcon |>
-  tbl("grn_distance_grd_130") |>
-  collect() |>
-  st_as_sf(wkt = "geom_wkt")
-
-greenspace_dist130 <- sf_dist130 |>
-  rasterize(empty.sr,
-    field = "distance_to_greenspace_meters"
-  )
-
-names(greenspace_dist130) <- "greenspace_dist130"
-# plot(greenspace_dist130)
-greenspace_dist130 |> writeRaster("data/predictors/130acre_greenspace_distance.tif", overwrite = T)
-rast("data/predictors/130acre_greenspace_distance.tif") |> names()
-
-# 75
-tic()
-tcon |> dbExecute(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "75", "75"))
-toc()
-# 19 minutes
-
-greenspace_dist75 <- tcon |>
-  tbl("grn_distance_grd_75") |>
-  collect() |>
-  st_as_sf(wkt = "geom_wkt") |>
-  rasterize(empty.sr, field = "distance_to_greenspace_meters")
-names(greenspace_dist75) <- "greenspace_dist75"
-plot(greenspace_dist75)
-greenspace_dist75 |> writeRaster("data/predictors/75acre_greenspace_distance.tif", overwrite = T)
-
-# 30
-tic()
-tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "30", "30")))
-toc()
-# 36 minutes
-
-sf_dist30 <- tcon |>
-  tbl("grn_distance_grd_30") |>
-  collect() |>
-  st_as_sf(wkt = "geom_wkt")
-
-greenspace_dist30 <- sf_dist30 |>
-  rasterize(empty.sr, field = "distance_to_greenspace_meters")
-# greenspace_dist30 <- rast("data/predictors/30acre_greenspace_distance.tif")
-names(greenspace_dist30) <- "greenspace_dist30"
-plot(greenspace_dist30)
-greenspace_dist30 |> writeRaster("data/predictors/30acre_greenspace_distance.tif",
-  overwrite = T
-)
-
-
-# 10
-tic()
-tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "10", "10")))
-toc()
-#  minutes
-
-sf_dist10 <- tcon |>
-  tbl("grn_distance_grd_10") |>
-  collect() |>
-  st_as_sf(wkt = "geom_wkt")
-
-greenspace_dist10 <- sf_dist10 |>
-  rasterize(empty.sr, field = "distance_to_greenspace_meters")
-
-# greenspace_dist10 <- rast("data/predictors/10acre_greenspace_distance.tif")
-names(greenspace_dist10) <- "greenspace_dist10"
-plot(greenspace_dist10)
-greenspace_dist10 |> writeRaster("data/predictors/10acre_greenspace_distance.tif", overwrite = T)
-
-
-# 2
-tic()
-tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_grd_%s AS", nn_query), "2", "2")))
-toc()
-#  7 hours
-
-sf_dist2 <- tcon |>
-  tbl("grn_distance_grd_2") |>
-  collect() |>
-  st_as_sf(wkt = "geom_wkt")
-
-greenspace_dist2 <- sf_dist2 |>
-  rasterize(empty.sr, field = "distance_to_greenspace_meters")
-
-# greenspace_dist2 <- rast("data/predictors/2acre_greenspace_distance.tif")
-names(greenspace_dist2) <- "greenspace_dist2"
-
-
-plot(greenspace_dist2)
-greenspace_dist2 |> writeRaster("data/predictors/2acre_greenspace_distance.tif", overwrite = T)
 
 
 #  ---------------------------------------
@@ -398,13 +263,23 @@ greenspace_dist2 |> writeRaster("data/predictors/2acre_greenspace_distance.tif",
 
 # Add cities shapefile so that we can limit the grid just to cities
 # City boundaries
-city_boundaries <- st_read("data/city_boundaries.gpkg")
+# city_boundaries <- st_read("data/city_boundaries.gpkg")
 
-tcon |> copy_to(
-  city_boundaries |> tibble() |> select(jurname, geom_wkt),
-  name = "baycities",
-  overwrite = T
-)
+# tcon |> copy_to(
+#   city_boundaries |> tibble() |> select(jurname, geom_wkt),
+#   name = "baycities",
+#   overwrite = T
+# )
+
+st_crs(st_read("data/city_boundaries.gpkg"))$epsg
+
+tcon |> dbExecute("
+CREATE OR REPLACE TABLE baycities AS
+SELECT *
+FROM ST_Read('data/city_boundaries.gpkg');
+
+CREATE INDEX idx_baycities_geom ON baycities USING RTREE (geom);
+")
 
 # tcon |> dbExecute("CREATE INDEX baycityindx ON baycities USING RTREE (geom)")
 
@@ -413,19 +288,14 @@ CREATE OR REPLACE TABLE template_grid_cities
 AS
 SELECT *
 FROM template_grid_geo, baycities
-WHERE ST_Intersects(template_grid_geo.geom, ST_GeomFromText(baycities.geom_wkt));
+-- WHERE ST_Intersects(template_grid_geo.geom, ST_GeomFromText(baycities.geom_wkt));
+WHERE ST_Intersects(template_grid_geo.geom, baycities.geom);
 
 CREATE INDEX idx_templatecities_geom ON template_grid_cities USING RTREE (geom);
 CREATE INDEX idx_tmp_centroidcities_geom ON template_grid_cities USING RTREE (centroid_geom);
 ")
 
-tcon |> tbl("baycities")
-tic()
-tcon |> dbExecute("SELECT *
-FROM template_grid_geo, baycities
-WHERE ST_Intersects(template_grid_geo.geom, ST_GeomFromText(baycities.geom_wkt))")
-toc()
-
+tcon |> tbl("template_grid_cities")
 
 
 # Create a table of essential greenspaces by:
@@ -459,58 +329,85 @@ tcon |>
 # good
 
 # Query to calculate minimum distance from each grid cell to essential greenspaces of specified size
-nness_query <- glue("
-WITH green AS
-(SELECT * FROM essential_greenspace
-WHERE area_acres >= %s)
+# nness_query <- glue("
+# WITH green AS
+# (SELECT * FROM essential_greenspace
+# WHERE area_acres >= %s)
 
+# SELECT
+#     template.id AS template_id,
+#     template.geom AS template_geom,
+#     ST_AsText(template.centroid_geom) AS geom_wkt,
+#     MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
+# FROM
+#     template_grid_cities AS template, green
+# GROUP BY
+#     template.id, template.geom, template.centroid_geom;
+# ")
+
+nness_query <- glue("
+CREATE OR REPLACE TABLE essential_greenspace_dist_complete AS
+WITH green AS (SELECT * FROM essential_greenspace WHERE AREA_acres >= 1),
+     distances AS (
+       SELECT
+         template.cell_id,
+         template.geom AS template_geom,
+         ST_AsText(template.centroid_geom) AS geom_wkt,
+         green.AREA_acres,
+         ST_Distance(template.centroid_geom3310, green.simple_geom3310) AS distance_meters
+       FROM template_grid_cities AS template, green
+     )
 SELECT
-    template.id AS template_id,
-    template.geom AS template_geom,
-    ST_AsText(template.centroid_geom) AS geom_wkt,
-    MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
-FROM
-    template_grid_cities AS template, green
-GROUP BY
-    template.id, template.geom, template.centroid_geom;
+    cell_id,
+    template_geom,
+    geom_wkt,
+    MIN(distance_meters) AS distance_to_greenspace_meters,
+    arg_min(AREA_acres, distance_meters) AS nearest_greenspace_acres
+FROM distances
+GROUP BY cell_id, template_geom, geom_wkt;
 ")
+
+tic()
+tcon |> dbExecute(nness_query)
+toc()
 
 slope.sr <- rast("data/predictors/slope.tif")
 empty.sr <- rast(slope.sr[[1]])
 
-# Function to create a distance raster showing minimum distance to essential
-# greenspaces of a given minimum size using nness_query
-makeEssentialDistance <- function(min_greenspace_size) {
-  tic()
-  tcon |> dbExecute(glue(sprintf(
-    paste("CREATE OR REPLACE TABLE essential_greenspace_dist_%s AS", nness_query),
-    min_greenspace_size, min_greenspace_size
-  )))
-  toc()
 
-  sf_dist <- tcon |>
-    tbl(paste0("essential_greenspace_dist_", min_greenspace_size)) |>
-    collect() |>
-    st_as_sf(wkt = "geom_wkt")
+sf_ess_dist_complete <- tcon |>
+  tbl("essential_greenspace_dist_complete") |>
+  select(cell_id, distance_to_greenspace_meters, nearest_greenspace_acres) |>
+  collect()
 
-  greenspace_dist <- sf_dist |>
-    rasterize(empty.sr, field = "distance_to_greenspace_meters")
+# Join your results back to preserve exact cell alignment
 
-  names(greenspace_dist) <- paste0("essential_greenspace_dist", min_greenspace_size)
+ess_aligned_results <- tibble(cells = empty.sr |> cells()) |>
+  left_join(sf_ess_dist_complete |> rename(cells = cell_id)) |>
+  select(cells, distance_to_greenspace_meters, nearest_greenspace_acres)
 
-  greenspace_dist |>
-    writeRaster(sprintf(
-      "data/predictors/%sacre_essential_greenspace_distance.tif",
-      min_greenspace_size
-    ), overwrite = T)
-}
+# Convert directly to raster values in the right order
+ess_greenspace_nearest_dist <- empty.sr
+values(ess_greenspace_nearest_dist) <- ess_aligned_results$distance_to_greenspace_meters
+names(ess_greenspace_nearest_dist) <- "essential_greenspace_nearest_dist"
 
-# do it for all distances
-c(130, 75, 30, 10, 2) |> map(makeEssentialDistance)
+ggplot() +
+  tidyterra::geom_spatraster(data = ess_greenspace_nearest_dist)
 
-# Checking
-rast("data/predictors/130acre_essential_greenspace_distance.tif") |> plot(main = "130 acre essential greenspace distance")
-rast("data/predictors/2acre_essential_greenspace_distance.tif") |> plot(main = "2 acre essential greenspace distance")
+ess_greenspace_nearest_dist |> writeRaster("data/predictors/essential_greenspace_nearest_dist.tif", overwrite = T)
+
+ess_greenspace_nearest_size <- empty.sr
+values(ess_greenspace_nearest_size) <- ess_aligned_results$nearest_greenspace_acres
+names(ess_greenspace_nearest_size) <- "essential_greenspace_nearest_size"
+
+ess_greenspace_nearest_size |> writeRaster("data/predictors/essential_greenspace_nearest_size.tif", overwrite = T)
+
+ggplot() +
+  tidyterra::geom_spatraster(data = ess_greenspace_nearest_size)
+
+
+
+
 
 
 # City-only all greenspace ---------------------------------------
@@ -535,65 +432,76 @@ CREATE INDEX idx_grn_all_simple_geom ON city_all_greenspace USING RTREE (simple_
 CREATE INDEX idx_grn_all_cent3310_geom ON city_all_greenspace USING RTREE (centroid_geom3310);
 ")
 
-
+# Calculate distances to all greenspaces in the city
 nncityall_query <- glue("
-WITH green AS
-(SELECT * FROM city_all_greenspace
-WHERE area_acres >= %s)
-
+CREATE OR REPLACE TABLE city_all_greenspace_dist_complete AS
+WITH green AS (SELECT * FROM city_all_greenspace WHERE AREA_acres >= 1),
+     distances AS (
+       SELECT
+         template.cell_id,
+         template.geom AS template_geom,
+         ST_AsText(template.centroid_geom) AS geom_wkt,
+         green.AREA_acres,
+         ST_Distance(template.centroid_geom3310, green.simple_geom3310) AS distance_meters
+       FROM template_grid_cities AS template, green
+     )
 SELECT
-    template.id AS template_id,
-    template.geom AS template_geom,
-    ST_AsText(template.centroid_geom) AS geom_wkt,
-    MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
-FROM
-    template_grid_cities AS template, green
-GROUP BY
-    template.id, template.geom, template.centroid_geom;
+    cell_id,
+    template_geom,
+    geom_wkt,
+    MIN(distance_meters) AS distance_to_greenspace_meters,
+    arg_min(AREA_acres, distance_meters) AS nearest_greenspace_acres
+FROM distances
+GROUP BY cell_id, template_geom, geom_wkt;
 ")
 
-makeAllCityDistance <- function(min_greenspace_size) {
-  tic()
-  tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE city_all_greenspace_dist_%s AS", nncityall_query), min_greenspace_size, min_greenspace_size)))
-  toc()
+tcon |> dbGetQuery(paste("EXPLAIN", nncityall_query))
 
-  sf_dist <- tcon |>
-    tbl(paste0("city_all_greenspace_dist_", min_greenspace_size)) |>
-    collect() |>
-    st_as_sf(wkt = "geom_wkt")
+tic()
+tcon |> dbExecute(nncityall_query)
+toc()
 
-  greenspace_dist <- sf_dist |>
-    rasterize(empty.sr, field = "distance_to_greenspace_meters")
+slope.sr <- rast("data/predictors/slope.tif")
+empty.sr <- rast(slope.sr[[1]])
 
-  names(greenspace_dist) <- paste0("city_all_greenspace_dist", min_greenspace_size)
 
-  greenspace_dist |>
-    writeRaster(sprintf(
-      "data/predictors/%sacre_city_all_greenspace_dist.tif",
-      min_greenspace_size
-    ), overwrite = T)
-}
+sf_city_all_dist_complete <- tcon |>
+  tbl("city_all_greenspace_dist_complete") |>
+  select(cell_id, distance_to_greenspace_meters, nearest_greenspace_acres) |>
+  collect()
 
-c(130, 75, 30, 10, 2) |> map(makeAllCityDistance)
+# Join your results back to preserve exact cell alignment
 
-rast(c(
-  "data/predictors/130acre_city_all_greenspace_dist.tif",
-  "data/predictors/2acre_city_all_greenspace_dist.tif"
-)) |> plot()
-# Looks good
+city_all_aligned_results <- tibble(cells = empty.sr |> cells()) |>
+  left_join(sf_city_all_dist_complete |> rename(cells = cell_id)) |>
+  select(cells, distance_to_greenspace_meters, nearest_greenspace_acres)
+
+# Convert directly to raster values in the right order
+city_all_greenspace_nearest_dist <- empty.sr
+values(city_all_greenspace_nearest_dist) <- city_all_aligned_results$distance_to_greenspace_meters
+names(city_all_greenspace_nearest_dist) <- "city_all_greenspace_nearest_dist"
+
+ggplot() +
+  tidyterra::geom_spatraster(data = city_all_greenspace_nearest_dist)
+
+city_all_greenspace_nearest_dist |> writeRaster("data/predictors/city_all_greenspace_nearest_dist.tif", overwrite = T)
+
+city_all_greenspace_nearest_size <- empty.sr
+values(city_all_greenspace_nearest_size) <- city_all_aligned_results$nearest_greenspace_acres
+names(city_all_greenspace_nearest_size) <- "city_all_greenspace_nearest_size"
+
+city_all_greenspace_nearest_size |> writeRaster("data/predictors/city_all_greenspace_nearest_size.tif", overwrite = T)
+
+ggplot() +
+  tidyterra::geom_spatraster(data = city_all_greenspace_nearest_size)
+
+
+
+
 
 # City-only non-essential greenspace ---------------------------------------
 #' Calculate distances to non-essential greenspaces in the city
 #' This follows the same pattern as essential and all greenspaces but filters for non-essential ones
-slope.sr <- rast("data/predictors/slope.tif")
-empty.sr <- rast(slope.sr[[1]])
-# Set memory limit for non-essential greenspace calculations
-tcon |> dbExecute("
-SET memory_limit = '200GB';
-SET preserve_insertion_order = true;
-SET threads TO 20;
-")
-
 
 tcon |> dbExecute("
 CREATE OR REPLACE TABLE city_nonessential_greenspace
@@ -630,349 +538,61 @@ GROUP BY
     template.id, template.geom, template.centroid_geom;
 ")
 
-makeNonEssentialCityDistance <- function(min_greenspace_size) {
-  tic()
-  tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE city_nonessential_greenspace_dist_%s AS", nncitynoness_query), min_greenspace_size, min_greenspace_size)))
-  toc()
 
-  sf_dist <- tcon |>
-    tbl(paste0("city_nonessential_greenspace_dist_", min_greenspace_size)) |>
-    collect() |>
-    st_as_sf(wkt = "geom_wkt")
-
-  greenspace_dist <- sf_dist |>
-    rasterize(empty.sr, field = "distance_to_greenspace_meters")
-
-  names(greenspace_dist) <- paste0("city_nonessential_greenspace_dist", min_greenspace_size)
-
-  greenspace_dist |>
-    writeRaster(sprintf(
-      "data/predictors/%sacre_city_nonessential_greenspace_dist.tif",
-      min_greenspace_size
-    ), overwrite = T)
-}
-
-c(130, 75, 30, 10, 2) |> map(makeNonEssentialCityDistance)
-
-# Check the results
-rast(c(
-  "data/predictors/130acre_city_nonessential_greenspace_dist.tif",
-  "data/predictors/2acre_city_nonessential_greenspace_dist.tif"
-)) |> plot()
-
-# Try more aggressive simplification to reduce streaking
-# Test with 10km tolerance instead of 5km
-tcon |> dbExecute("
-CREATE OR REPLACE TABLE greenspace_geo_smooth AS
-SELECT * EXCLUDE geom,
-  grn.geom,
-  ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true) AS geom3310,
-  ST_TRANSFORM(ST_Centroid(grn.geom), 'EPSG:4326', 'EPSG:3310', always_xy := true) AS centroid_geom3310,
-  ST_Centroid(grn.geom) AS centroid_geom,
-  ST_SimplifyPreserveTopology(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true), 10000) AS simple_geom3310,
-  ST_SimplifyPreserveTopology(grn.geom, .1) AS simple_geom
-FROM ST_READ('data/predictor_prep/nlcd_greenspace_area.gpkg') AS grn
-JOIN baycounties
-  ON ST_Intersects(grn.geom, baycounties.geom);
-
-CREATE INDEX idx_grn_smooth_geom ON greenspace_geo_smooth USING RTREE (geom);
-CREATE INDEX idx_grn_smooth_simple_geom ON greenspace_geo_smooth USING RTREE (simple_geom3310);
+nncitynoness_query <- glue("
+CREATE OR REPLACE TABLE city_nonessential_greenspace_dist_complete AS
+WITH green AS (SELECT * FROM city_nonessential_greenspace WHERE AREA_acres >= 1),
+     distances AS (
+       SELECT
+         template.cell_id,
+         template.geom AS template_geom,
+         ST_AsText(template.centroid_geom) AS geom_wkt,
+         green.AREA_acres,
+         ST_Distance(template.centroid_geom3310, green.simple_geom3310) AS distance_meters
+       FROM template_grid_cities AS template, green
+     )
+SELECT
+    cell_id,
+    template_geom,
+    geom_wkt,
+    MIN(distance_meters) AS distance_to_greenspace_meters,
+    arg_min(AREA_acres, distance_meters) AS nearest_greenspace_acres
+FROM distances
+GROUP BY cell_id, template_geom, geom_wkt;
 ")
 
-# Alternative: Try buffer-based approach to create smoother edges
-tcon |> dbExecute("
-CREATE OR REPLACE TABLE greenspace_geo_buffered AS
-SELECT * EXCLUDE geom,
-  grn.geom,
-  ST_Buffer(ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true), -100) AS geom3310,
-  ST_TRANSFORM(ST_Centroid(grn.geom), 'EPSG:4326', 'EPSG:3310', always_xy := true) AS centroid_geom3310,
-  ST_Centroid(grn.geom) AS centroid_geom,
-  ST_Buffer(
-    ST_SimplifyPreserveTopology(
-      ST_TRANSFORM(grn.geom, 'EPSG:4326', 'EPSG:3310', always_xy := true),
-      5000
-    ),
-    -100  -- Small negative buffer to smooth edges
-  ) AS simple_geom3310
-FROM ST_READ('data/predictor_prep/nlcd_greenspace_area.gpkg') AS grn
-JOIN baycounties
-  ON ST_Intersects(grn.geom, baycounties.geom);
+tic()
+tcon |> dbExecute(nncitynoness_query)
+toc()
 
-CREATE INDEX idx_grn_buff_geom ON greenspace_geo_buffered USING RTREE (geom3310);
-CREATE INDEX idx_grn_buff_simple_geom ON greenspace_geo_buffered USING RTREE (simple_geom3310);
-")
-
-# Test different approaches to reduce streaking while maintaining edge distances
-
-# Function to test smoothed geometries
-test_smooth_distance <- function(min_greenspace_size = 130) {
-  query <- glue("
-  WITH green AS
-  (SELECT * FROM greenspace_geo_smooth
-  WHERE AREA_acres >= {min_greenspace_size})
-
-  SELECT
-      template.id AS template_id,
-      template.geom AS template_geom,
-      ST_AsText(template.centroid_geom) AS geom_wkt,
-      MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
-  FROM
-      template_grid_geo AS template, green
-  GROUP BY
-      template.id, template.geom, template.centroid_geom;
-  ")
-
-  tic()
-  tcon |> dbExecute(glue("CREATE OR REPLACE TABLE test_smooth_{min_greenspace_size} AS {query}"))
-  toc()
-
-  return(glue("test_smooth_{min_greenspace_size}"))
-}
-
-# Function to test buffered geometries
-test_buffered_distance <- function(min_greenspace_size = 130) {
-  query <- glue("
-  WITH green AS
-  (SELECT * FROM greenspace_geo_buffered
-  WHERE AREA_acres >= {min_greenspace_size})
-
-  SELECT
-      template.id AS template_id,
-      template.geom AS template_geom,
-      ST_AsText(template.centroid_geom) AS geom_wkt,
-      MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
-  FROM
-      template_grid_geo AS template, green
-  GROUP BY
-      template.id, template.geom, template.centroid_geom;
-  ")
-
-  tic()
-  tcon |> dbExecute(glue("CREATE OR REPLACE TABLE test_buffered_{min_greenspace_size} AS {query}"))
-  toc()
-
-  return(glue("test_buffered_{min_greenspace_size}"))
-}
-
-# Test the approaches
-smooth_table <- test_smooth_distance(130)
-buffered_table <- test_buffered_distance(130)
-
-# Convert to rasters for comparison
 slope.sr <- rast("data/predictors/slope.tif")
 empty.sr <- rast(slope.sr[[1]])
 
-# Smooth geometry approach
-sf_smooth <- tcon |>
-  tbl(smooth_table) |>
-  collect() |>
-  st_as_sf(wkt = "geom_wkt")
+sf_city_noness_dist_complete <- tcon |>
+  tbl("city_nonessential_greenspace_dist_complete") |>
+  select(cell_id, distance_to_greenspace_meters, nearest_greenspace_acres) |>
+  collect()
 
-greenspace_smooth <- sf_smooth |>
-  rasterize(empty.sr, field = "distance_to_greenspace_meters")
+# Join your results back to preserve exact cell alignment
+city_noness_aligned_results <- tibble(cells = empty.sr |> cells()) |>
+  left_join(sf_city_noness_dist_complete |> rename(cells = cell_id)) |>
+  select(cells, distance_to_greenspace_meters, nearest_greenspace_acres)
 
-# Buffered geometry approach
-sf_buffered <- tcon |>
-  tbl(buffered_table) |>
-  collect() |>
-  st_as_sf(wkt = "geom_wkt")
-
-greenspace_buffered <- sf_buffered |>
-  rasterize(empty.sr, field = "distance_to_greenspace_meters")
-
-# Plot comparison
-library(patchwork)
-p1 <- ggplot() +
-  tidyterra::geom_spatraster(data = greenspace_smooth) +
-  ggtitle("Smooth (10km tolerance)")
-p2 <- ggplot() +
-  tidyterra::geom_spatraster(data = greenspace_buffered) +
-  ggtitle("Buffered (-100m)")
-
-comparison_plot <- p1 + p2
-ggsave("results/streak_comparison.pdf", comparison_plot, width = 12, height = 6)
-
-# More efficient alternatives to the cross-product approach
-
-# Option 1: Use ST_DWithin to limit search radius (much faster)
-efficient_nn_query_v1 <- glue("
-WITH green AS (SELECT * FROM greenspace_geo WHERE AREA_acres >= %s)
-
-SELECT
-    template.id AS template_id,
-    template.cell_id AS cell_id,
-    template.geom AS template_geom,
-    ST_AsText(template.centroid_geom) AS geom_wkt,
-    MIN(ST_Distance(template.centroid_geom3310, green.simple_geom3310)) AS distance_to_greenspace_meters
-FROM
-    template_grid_geo AS template
-JOIN green ON ST_DWithin(template.centroid_geom3310, green.centroid_geom3310, 50000)  -- 50km radius
-GROUP BY
-    template.id, template.cell_id, template.geom, template.centroid_geom;
-")
-
-tic()
-tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_test AS", efficient_nn_query_v1), "500")))
-toc()
-
-
-sf_dist_complete <- tcon |>
-  tbl("grn_distance_test") |>
-  select(cell_id, distance_to_greenspace_meters) |>
-  collect() #|>
-
-aligned_results <- tibble(cells = empty.sr |> cells()) |>
-  left_join(sf_dist_complete |> rename(cells = cell_id)) |>
-  select(cells, distance_to_greenspace_meters)
-
-greenspace_nearest_dist <- empty.sr
-values(greenspace_nearest_dist) <- aligned_results$distance_to_greenspace_meters
+# Convert directly to raster values in the right order
+city_noness_greenspace_nearest_dist <- empty.sr
+values(city_noness_greenspace_nearest_dist) <- city_noness_aligned_results$distance_to_greenspace_meters
+names(city_noness_greenspace_nearest_dist) <- "city_nonessential_greenspace_nearest_dist"
 
 ggplot() +
-  tidyterra::geom_spatraster(data = greenspace_nearest_dist)
+  tidyterra::geom_spatraster(data = city_noness_greenspace_nearest_dist)
 
-# Option 2: Two-stage approach - coarse then fine
-efficient_nn_query_v2 <- glue("
-WITH green AS (SELECT * FROM greenspace_geo WHERE AREA_acres >= %s),
-     coarse_candidates AS (
-       SELECT DISTINCT
-         template.id,
-         template.geom,
-         template.centroid_geom,
-         template.centroid_geom3310
-       FROM template_grid_geo AS template
-       JOIN green ON ST_DWithin(template.centroid_geom3310, green.centroid_geom3310, 25000)
-     )
+city_noness_greenspace_nearest_dist |> writeRaster("data/predictors/city_nonessential_greenspace_nearest_dist.tif", overwrite = T)
 
-SELECT
-    template.id AS template_id,
-    template.cell_id AS cell_id,
-    template.geom AS template_geom,
-    ST_AsText(template.centroid_geom) AS geom_wkt,
-    MIN(ST_Distance(template.centroid_geom3310, green.centroid_geom3310)) AS distance_to_greenspace_meters
-FROM
-    coarse_candidates AS template, green
-GROUP BY
-    template.id, template.cell_id, template.geom, template.centroid_geom;
-")
+city_noness_greenspace_nearest_size <- empty.sr
+values(city_noness_greenspace_nearest_size) <- city_noness_aligned_results$nearest_greenspace_acres
+names(city_noness_greenspace_nearest_size) <- "city_nonessential_greenspace_nearest_size"
 
-tic()
-tcon |> dbExecute(glue(sprintf(paste("CREATE OR REPLACE TABLE grn_distance_test AS", efficient_nn_query_v1), "500")))
-toc()
-
-
-sf_dist_complete <- tcon |>
-  tbl("grn_distance_test") |>
-  select(cell_id, distance_to_greenspace_meters) |>
-  collect() #|>
-
-aligned_results <- tibble(cells = empty.sr |> cells()) |>
-  left_join(sf_dist_complete |> rename(cells = cell_id)) |>
-  select(cells, distance_to_greenspace_meters)
-
-greenspace_nearest_dist <- empty.sr
-values(greenspace_nearest_dist) <- aligned_results$distance_to_greenspace_meters
+city_noness_greenspace_nearest_size |> writeRaster("data/predictors/city_nonessential_greenspace_nearest_size.tif", overwrite = T)
 
 ggplot() +
-  tidyterra::geom_spatraster(data = greenspace_nearest_dist)
-
-# Option 3: Spatial partitioning using grid tiles
-efficient_nn_query_v3 <- glue("
-WITH green AS (SELECT * FROM greenspace_geo WHERE AREA_acres >= %s),
-     spatial_grid AS (
-       SELECT
-         template.*,
-         FLOOR(ST_X(centroid_geom3310) / 10000) * 10000 AS grid_x,
-         FLOOR(ST_Y(centroid_geom3310) / 10000) * 10000 AS grid_y
-       FROM template_grid_geo AS template
-     ),
-     green_grid AS (
-       SELECT
-         green.*,
-         FLOOR(ST_X(centroid_geom3310) / 10000) * 10000 AS grid_x,
-         FLOOR(ST_Y(centroid_geom3310) / 10000) * 10000 AS grid_y
-       FROM green
-     )
-
-SELECT
-    template.id AS template_id,
-    template.cell_id AS cell_id,
-    template.geom AS template_geom,
-    ST_AsText(template.centroid_geom) AS geom_wkt,
-    MIN(ST_Distance(template.centroid_geom3310, green.centroid_geom3310)) AS distance_to_greenspace_meters
-FROM
-    spatial_grid AS template
-JOIN green_grid AS green ON (
-    green.grid_x BETWEEN template.grid_x - 10000 AND template.grid_x + 10000 AND
-    green.grid_y BETWEEN template.grid_y - 10000 AND template.grid_y + 10000
-)
-GROUP BY
-    template.id, template.cell_id, template.geom, template.centroid_geom;
-")
-
-# Option 4: Use convex hulls with spatial filtering
-efficient_hull_query <- glue("
-WITH green AS (SELECT * FROM greenspace_geo WHERE AREA_acres >= %s)
-
-SELECT
-    template.id AS template_id,
-    template.cell_id AS cell_id,
-    template.geom AS template_geom,
-    ST_AsText(template.centroid_geom) AS geom_wkt,
-    MIN(ST_Distance(template.centroid_geom3310, green.hull_geom3310)) AS distance_to_greenspace_meters
-FROM
-    template_grid_geo AS template
-JOIN green ON ST_DWithin(template.centroid_geom3310, green.hull_geom3310, 30000)  -- 30km radius
-GROUP BY
-    template.id, template.cell_id, template.geom, template.centroid_geom;
-")
-
-# Test functions for each approach
-test_efficient_v1 <- function(min_greenspace_size = 130) {
-  query <- sprintf(efficient_nn_query_v1, min_greenspace_size)
-  tic()
-  tcon |> dbExecute(glue("CREATE OR REPLACE TABLE efficient_v1_{min_greenspace_size} AS {query}"))
-  toc()
-  cat("V1 (ST_DWithin) completed\n")
-}
-
-test_efficient_v2 <- function(min_greenspace_size = 130) {
-  query <- sprintf(efficient_nn_query_v2, min_greenspace_size)
-  tic()
-  tcon |> dbExecute(glue("CREATE OR REPLACE TABLE efficient_v2_{min_greenspace_size} AS {query}"))
-  toc()
-  cat("V2 (Two-stage) completed\n")
-}
-
-test_efficient_v3 <- function(min_greenspace_size = 130) {
-  query <- sprintf(efficient_nn_query_v3, min_greenspace_size)
-  tic()
-  tcon |> dbExecute(glue("CREATE OR REPLACE TABLE efficient_v3_{min_greenspace_size} AS {query}"))
-  toc()
-  cat("V3 (Spatial grid) completed\n")
-}
-
-test_efficient_hull <- function(min_greenspace_size = 130) {
-  query <- sprintf(efficient_hull_query, min_greenspace_size)
-  tic()
-  tcon |> dbExecute(glue("CREATE OR REPLACE TABLE efficient_hull_{min_greenspace_size} AS {query}"))
-  toc()
-  cat("Hull approach completed\n")
-}
-
-# Run performance comparison
-cat("Testing efficient approaches...\n")
-# test_efficient_v1(130)  # Start with this one - should be much faster
-# test_efficient_v2(130)
-# test_efficient_hull(130)  # This uses your hull_geom3310 column
-
-# Check for invalid geometries that might be causing streaks
-tcon |> dbGetQuery("
-SELECT
-  COUNT(*) as total_geometries,
-  COUNT(CASE WHEN ST_IsValid(geom3310) THEN 1 END) as valid_geom3310,
-  COUNT(CASE WHEN ST_IsValid(simple_geom3310) THEN 1 END) as valid_simple_geom3310,
-  COUNT(CASE WHEN ST_IsValid(simple_geombuff3310) THEN 1 END) as valid_simple_geombuff3310
-FROM greenspace_geo
-WHERE AREA_acres >= 500
-")
+  tidyterra::geom_spatraster(data = city_noness_greenspace_nearest_size)
