@@ -6,8 +6,6 @@ library(tidyverse)
 library(CoordinateCleaner)
 library(SDMtune)
 library(furrr)
-library(RPostgreSQL)
-library(vscDebugger)
 library(sf)
 # .vsc.listen()
 
@@ -27,7 +25,7 @@ sdm_train_mask.sf <- terrestrial.sf
 
 city_boundaries <- st_read("data/city_boundaries.gpkg")
 
-results.dir <- "results/sdm/run-2025-04-02_city-limits-specswitch/"
+results.dir <- "results/sdm/run-2025-07-01_fix-greenspace/"
 
 dir.create(results.dir, recursive = TRUE)
 
@@ -37,19 +35,19 @@ dir.create(results.dir, recursive = TRUE)
 
 # -------------------------------------------------------------------------
 
-bioclim.stack <- rast("data/predictors/bioclim.tif")
-# vif.out <- vifstep(bioclim.stack |> as.data.frame(), th=10)
-# vif.out@excluded |> paste(collapse="','") |> paste0("c('",.,"')")
-vif_excluded <- c(
-  "Temperature Annual Range", "Precipitation of Wettest Quarter",
-  "Temperature Seasonality", "Precipitation of Coldest Quarter",
-  "Mean Temperature of Driest Quarter", "Annual Precipitation",
-  "Max Temperature of Warmest Month",
-  "Mean Temperature of Warmest Quarter", "Annual Mean Temperature",
-  "Min Temperature of Coldest Month", "Precipitation of Wettest Month"
-)
+# bioclim.stack <- rast("data/predictors/bioclim.tif")
+# # vif.out <- vifstep(bioclim.stack |> as.data.frame(), th=10)
+# # vif.out@excluded |> paste(collapse="','") |> paste0("c('",.,"')")
+# vif_excluded <- c(
+#   "Temperature Annual Range", "Precipitation of Wettest Quarter",
+#   "Temperature Seasonality", "Precipitation of Coldest Quarter",
+#   "Mean Temperature of Driest Quarter", "Annual Precipitation",
+#   "Max Temperature of Warmest Month",
+#   "Mean Temperature of Warmest Quarter", "Annual Mean Temperature",
+#   "Min Temperature of Coldest Month", "Precipitation of Wettest Month"
+# )
 
-bioclim_uncorr.stack <- subset(bioclim.stack, vif_excluded, negate = T)
+# bioclim_uncorr.stack <- subset(bioclim.stack, vif_excluded, negate = T)
 
 list.files("data/predictors")
 predictor_names <- c(
@@ -59,17 +57,20 @@ predictor_names <- c(
   "nlcd_reclass_landcover",
   "nlcd_treecover",
   "wetland_fresh_distance", "natural-stream-dist",
-  "2acre_greenspace_distance", "10acre_greenspace_distance",
-  "30acre_greenspace_distance", "75acre_greenspace_distance", "130acre_greenspace_distance",
+  # "2acre_greenspace_distance", "10acre_greenspace_distance",
+  # "30acre_greenspace_distance", "75acre_greenspace_distance", "130acre_greenspace_distance",
+  "/greenspace_nearest_dist.tif", "/greenspace_nearest_size.tif",
   "nlcd_impervious", "CES_traffic", "CES_pollution"
   # "ces"
   # "soils_suborder" # incomplete data
 )
+
+
 predictors.sr <-
   rast(list.files("data/predictors", full.names = T) |>
     str_subset(".tif$") |>
     str_subset(paste(predictor_names, collapse = "|"))) |>
-  c(bioclim_uncorr.stack) |>
+  # c(bioclim_uncorr.stack) |>
   mask(sdm_train_mask.sf |> st_transform(4326))
 
 # names(predictors.sr) <- names(predictors.sr) |> str_replace_all(" ", "_")
@@ -78,17 +79,19 @@ name_change.df <-
   tibble(RAWNAME = names(predictors.sr)) |>
   mutate(DERNAME = case_when(
     RAWNAME == "dem30m_ba_reg" ~ "Elevation",
-    RAWNAME == "greenspace_dist2" ~ "Min Distance to 2acre Greenspace",
-    RAWNAME == "greenspace_dist10" ~ "Min Distance to 10acre Greenspace",
-    RAWNAME == "greenspace_dist30" ~ "Min Distance to 30acre Greenspace",
-    RAWNAME == "greenspace_dist75" ~ "Min Distance to 75acre Greenspace",
-    RAWNAME == "greenspace_dist130" ~ "Min Distance to 130acre Greenspace",
+    # RAWNAME == "greenspace_dist2" ~ "Min Distance to 2acre Greenspace",
+    # RAWNAME == "greenspace_dist10" ~ "Min Distance to 10acre Greenspace",
+    # RAWNAME == "greenspace_dist30" ~ "Min Distance to 30acre Greenspace",
+    # RAWNAME == "greenspace_dist75" ~ "Min Distance to 75acre Greenspace",
+    # RAWNAME == "greenspace_dist130" ~ "Min Distance to 130acre Greenspace",
     RAWNAME == "Tree Cover" ~ "NLCD Percent Tree Cover",
     RAWNAME == "prcnt_slope30" ~ "Percent Slope Grade",
     RAWNAME == "aspect" ~ "Slope Aspect",
     RAWNAME == "CLN2_VEGETATION." ~ "Eveg Vegetation Class",
     RAWNAME == "DIST" ~ "Min Distance to Standing Freshwater",
     RAWNAME == "natural-stream-dist" ~ "Min Distance to Freshwater Stream",
+    RAWNAME == "greenspace_nearest_dist" ~ "Nearest Greenspace Distance",
+    RAWNAME == "greenspace_nearest_size" ~ "Nearest Greenspace Size",
     T ~ RAWNAME
   )) |>
   mutate(DERNAME = str_replace_all(DERNAME, " ", "_"))
@@ -158,6 +161,10 @@ spec.sf |>
 spec_intersect.sf <- spec.sf |>
   st_intersection(sdm_train_mask.sf |> st_transform(st_crs(spec.sf)))
 
+# spec_intersect.sf |>
+#   filter(species == "Callipepla californica") |>
+#   nrow()
+
 spec_cleaned.sf <-
   spec_intersect.sf |>
   as_tibble() |>
@@ -204,6 +211,10 @@ spec_cleaned.sf <-
     sf_column_name = "geom"
   ) |>
   filter(year > 2000)
+
+# spec_cleaned.sf |>
+#   filter(species == "Callipepla californica") |>
+#   nrow()
 
 # Percent of records removed
 100 * (nrow(spec_intersect.sf) - nrow(spec_cleaned.sf)) / nrow(spec_intersect.sf)
@@ -291,6 +302,7 @@ species <- c("Pituophis catenifer", "Callipepla californica", "Lepus californicu
 
 # for(spec in species){
 trainSDM <- function(spec, input_obs) {
+  # browser()
   print(spec)
   spec_dir <- paste0(results.dir, spec |> str_replace(" ", "_"), "/")
 
@@ -310,24 +322,26 @@ trainSDM <- function(spec, input_obs) {
 
     # Crop and mask predictors and input obs to city boundaries
     # Comment this section out if you don't want to crop to city boundaries
-    city_name <- case_when(
-      spec == "Pituophis catenifer" ~ "Oakland_Piedmont",
-      spec == "Callipepla californica" ~ "San Francisco",
-      spec == "Lynx rufus" ~ "Oakland_Piedmont",
-      spec == "Microtus californicus" ~ "Oakland_Piedmont",
-      spec == "Lepus californicus" ~ "San Jose",
-      TRUE ~ NA # default case
-    )
+    # Why did I do this? I don't think this is right
+    # city_name <- case_when(
+    #   spec == "Pituophis catenifer" ~ "Oakland_Piedmont",
+    #   spec == "Callipepla californica" ~ "San Francisco",
+    #   spec == "Lynx rufus" ~ "Oakland_Piedmont",
+    #   spec == "Microtus californicus" ~ "Oakland_Piedmont",
+    #   spec == "Lepus californicus" ~ "San Jose",
+    #   TRUE ~ NA # default case
+    # )
 
-    city_boundary <- city_boundaries |>
-      filter(jurname == city_name)
+    # city_boundary <- city_boundaries |>
+    #   filter(jurname == city_name)
 
-    predictor.stack <- predictor.stack |>
-      crop(city_boundary) |>
-      mask(city_boundary)
-
+    # predictor.stack <- predictor.stack |>
+    #   crop(city_boundary) |>
+    #   mask(city_boundary)
+    # browser()
     # input_obs_backup <- input_obs
     input_obs_spec <- input_obs |> filter(species == spec)
+
 
     input_obs_spec_thinned <- input_obs_spec |>
       # Extract cell numbers for each point
@@ -337,23 +351,25 @@ trainSDM <- function(spec, input_obs) {
       ungroup() |>
       st_as_sf()
 
-    sprintf("Thinned %s points", nrow(input_obs_spec) - nrow(input_obs_spec_thinned))
+
+    sprintf("Removed %s points while thinning", nrow(input_obs_spec) - nrow(input_obs_spec_thinned))
 
     # plot(predictor.stack[[1]])
-    input_obs_spec_thinned <- input_obs_spec_thinned |>
-      st_intersection(city_boundary)
+    # input_obs_spec_thinned <- input_obs_spec_thinned |>
+    #   st_intersection(city_boundary)
 
     pos_pts.df <- input_obs_spec_thinned |>
       filter(species == spec) |>
       st_coordinates()
 
-    ggplot() +
-      geom_sf(data = city_boundary) +
-      geom_sf(data = input_obs_spec_thinned |> filter(species == spec))
+    # ggplot() +
+    #   geom_sf(data = city_boundary) +
+    #   geom_sf(data = input_obs_spec_thinned |> filter(species == spec))
+    # browser()
 
-    region_pointdens.sr <- point_dens.sr |>
-      crop(city_boundary) |>
-      mask(city_boundary)
+    region_pointdens.sr <- point_dens.sr #|>
+    # crop(city_boundary) |>
+    # mask(city_boundary)
 
     # Sample randomly using point density
     bg.df <- as.data.frame(
@@ -511,11 +527,15 @@ trainSDM <- function(spec, input_obs) {
 # For parallel training of multiple species if needed
 safeSDM <- safely(.f = trainSDM)
 
-# plan(sequential)
-plan(multicore, workers = 3)
+plan(sequential)
 
+
+map(species, ~ trainSDM(., input_obs = spec_cleaned.sf))
+
+# map("Callipepla californica", ~ trainSDM(., input_obs = spec_cleaned.sf))
+plan(multicore, workers = 3)
 system.time({
-  future_map(species, ~ safeSDM(., input_obs = spec_cleaned.sf), seed = T)
+  future_map(species, ~ safeSDM(., input_obs = spec_cleaned.sf))
 })
 
 
@@ -588,17 +608,21 @@ optimizeModels <- function(spec) {
   write.csv(vi_maxnet, paste0(spec_dir, "optimized/var_imp.csv"))
 }
 
-species <- c("Callipepla californica", "Lepus californicus")
-for (spec in species) {
-  optimizeModels(spec)
-}
+# species <- c("Callipepla californica", "Lepus californicus")
+species <- c("Pituophis catenifer", "Callipepla californica", "Lepus californicus")
+
+# for (spec in species) {
+#   optimizeModels(spec)
+# }
 
 # For parallel training of multiple species if needed
 safeOptimize <- safely(.f = optimizeModels)
 
 # plan(sequential)
 plan(multicore, workers = 3)
+# plan(sequential))
 
 system.time({
-  future_map(species, safeOptimize, seed = T)
+  # future_map(species, safeOptimize, seed = T)
+  future_map(species, optimizeModels)
 })
