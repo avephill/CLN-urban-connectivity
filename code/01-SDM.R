@@ -583,12 +583,12 @@ optimizeModels <- function(spec) {
     TRUE ~ NA # default case
   )
 
-  city_boundary <- city_boundaries |>
-    filter(jurname == city_name)
+  # city_boundary <- city_boundaries |>
+  #   filter(jurname == city_name)
 
-  predictor.stack <- predictor.stack |>
-    crop(city_boundary) |>
-    mask(city_boundary)
+  # predictor.stack <- predictor.stack |>
+  #   crop(city_boundary) |>
+  #   mask(city_boundary)
 
   # Make prediction
 
